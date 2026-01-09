@@ -1,6 +1,9 @@
 package common
 
 import (
+	"strconv"
+	"strings"
+
 	"github.com/blockchain-data-standards/manifesto/evm"
 )
 
@@ -9,11 +12,25 @@ const KeySeparator = "|"
 type ContextKey string
 
 func HexToUint64(hexValue string) (uint64, error) {
-	return evm.HexToUint64(hexValue)
+	s := strings.TrimSpace(hexValue)
+	if s != "" && !strings.HasPrefix(s, "0x") && !strings.HasPrefix(s, "0X") {
+		if u, err := strconv.ParseUint(s, 10, 64); err == nil {
+			return u, nil
+		}
+	}
+	return evm.HexToUint64(s)
 }
 
 func HexToInt64(hexValue string) (int64, error) {
-	return evm.HexToInt64(hexValue)
+	s := strings.TrimSpace(hexValue)
+	if s != "" && !strings.HasPrefix(s, "0x") && !strings.HasPrefix(s, "0X") {
+		// Some upstreams incorrectly return EVM quantities as base-10 strings (e.g. "44007042")
+		// instead of 0x-prefixed hex. Be tolerant to avoid breaking upstream health tracking.
+		if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return i, nil
+		}
+	}
+	return evm.HexToInt64(s)
 }
 
 func HexToBytes(hexValue string) ([]byte, error) {
