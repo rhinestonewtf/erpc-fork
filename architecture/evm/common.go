@@ -32,7 +32,7 @@ func upstreamPostForward_markUnexpectedEmpty(
 		details["rawResult"] = jrr.GetResultString()
 	}
 
-	return rs, common.NewErrEndpointMissingData(
+	missingErr := common.NewErrEndpointMissingData(
 		common.NewErrJsonRpcExceptionInternal(
 			0,
 			common.JsonRpcErrorMissingData,
@@ -42,4 +42,20 @@ func upstreamPostForward_markUnexpectedEmpty(
 		),
 		u,
 	)
+	// Mark retryable if the requested block is near the upstream's head (transient propagation race)
+	if mdErr, ok := missingErr.(*common.ErrEndpointMissingData); ok && u != nil {
+		if evmUps, ok := u.(common.EvmUpstream); ok {
+			if sp := evmUps.EvmStatePoller(); sp != nil {
+				latestBlock := sp.LatestBlock()
+				if bn := rq.EvmBlockNumber(); bn != nil {
+					if blockNum, ok := bn.(int64); ok && latestBlock > 0 && blockNum > latestBlock {
+						if blockNum-latestBlock <= 4 {
+							mdErr.MarkRetryableTowardsUpstream()
+						}
+					}
+				}
+			}
+		}
+	}
+	return rs, missingErr
 }

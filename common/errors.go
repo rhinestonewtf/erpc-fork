@@ -2050,6 +2050,12 @@ func (e *ErrEndpointMissingData) ErrorStatusCode() int {
 	return http.StatusOK
 }
 
+// MarkRetryableTowardsUpstream flags this error as retryable towards the same upstream.
+// Used for near-head missing data where the block exists but hasn't fully propagated yet.
+func (e *ErrEndpointMissingData) MarkRetryableTowardsUpstream() {
+	e.Details["retryableTowardsUpstream"] = true
+}
+
 type ErrUpstreamNodeTypeMismatch struct{ BaseError }
 
 const ErrCodeUpstreamNodeTypeMismatch = "ErrUpstreamNodeTypeMismatch"
@@ -2352,6 +2358,13 @@ func IsRetryableTowardsUpstream(err error) bool {
 			}
 			// If we get here, none of the underlying errors were retryable
 			return false
+		}
+	}
+
+	// If the error explicitly declares retryability towards upstream (e.g. near-head missing data)
+	if se, ok := err.(StandardError); ok {
+		if rt, ok := se.DeepSearch("retryableTowardsUpstream").(bool); ok {
+			return rt
 		}
 	}
 

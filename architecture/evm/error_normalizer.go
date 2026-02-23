@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 
 	bdscommon "github.com/blockchain-data-standards/manifesto/common"
@@ -189,7 +191,7 @@ func ExtractJsonRpcError(r *http.Response, nr *common.NormalizedResponse, jr *co
 		//----------------------------------------------------------------
 
 		if IsMissingDataError(err) {
-			return common.NewErrEndpointMissingData(
+			missingErr := common.NewErrEndpointMissingData(
 				common.NewErrJsonRpcExceptionInternal(
 					int(code),
 					common.JsonRpcErrorMissingData,
@@ -199,6 +201,8 @@ func ExtractJsonRpcError(r *http.Response, nr *common.NormalizedResponse, jr *co
 				),
 				upstream,
 			)
+			markRetryableIfNearHead(missingErr, upstream, err.Message)
+			return missingErr
 		}
 
 		//----------------------------------------------------------------
@@ -376,7 +380,7 @@ func ExtractJsonRpcError(r *http.Response, nr *common.NormalizedResponse, jr *co
 				strings.Contains(msg, "Block") ||
 				strings.Contains(msg, "transaction") ||
 				strings.Contains(msg, "Transaction") {
-				return common.NewErrEndpointMissingData(
+				missingErr := common.NewErrEndpointMissingData(
 					common.NewErrJsonRpcExceptionInternal(
 						int(code),
 						common.JsonRpcErrorMissingData,
@@ -386,6 +390,8 @@ func ExtractJsonRpcError(r *http.Response, nr *common.NormalizedResponse, jr *co
 					),
 					upstream,
 				)
+				markRetryableIfNearHead(missingErr, upstream, err.Message)
+				return missingErr
 			} else {
 				// by default, we retry this type of client-side exception, as the root cause
 				// might be an unsupported method or missing data, that another upstream might support.
@@ -853,4 +859,50 @@ func getVendorSpecificErrorIfAny(
 	}
 
 	return vn.GetVendorSpecificErrorIfAny(req, rp, jr, details)
+}
+
+var hexBlockNumberPattern = regexp.MustCompile(`0x[0-9a-fA-F]+`)
+
+// markRetryableIfNearHead marks an ErrEndpointMissingData as retryable towards the same
+// upstream when the missing block is within a few blocks of the upstream's tracked latest.
+// This handles transient propagation races where the block exists but hasn't fully indexed yet.
+func markRetryableIfNearHead(missingErr error, upstream common.Upstream, errorMsg string) {
+	mdErr, ok := missingErr.(*common.ErrEndpointMissingData)
+	if !ok || upstream == nil {
+		return
+	}
+	evmUps, ok := upstream.(common.EvmUpstream)
+	if !ok {
+		return
+	}
+	sp := evmUps.EvmStatePoller()
+	if sp == nil {
+		return
+	}
+	latestBlock := sp.LatestBlock()
+	if latestBlock <= 0 {
+		return
+	}
+	reqBlock, ok := extractBlockNumberFromMessage(errorMsg)
+	if !ok || reqBlock <= 0 {
+		return
+	}
+	distance := reqBlock - latestBlock
+	if distance > 0 && distance <= 4 {
+		mdErr.MarkRetryableTowardsUpstream()
+	}
+}
+
+// extractBlockNumberFromMessage extracts a hex block number from an error message.
+// Matches patterns like "block not found with number 0x288dc51".
+func extractBlockNumberFromMessage(msg string) (int64, bool) {
+	match := hexBlockNumberPattern.FindString(msg)
+	if match == "" {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(match, 0, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
