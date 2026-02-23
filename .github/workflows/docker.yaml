@@ -1,0 +1,170 @@
+name: Build and push Docker image
+
+on:
+  push:
+    branches: ["main", "release"]
+
+jobs:
+  docker:
+    name: Build and push Docker image
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: us-east-1
+      ECR_REGISTRY: 336594912921.dkr.ecr.us-east-1.amazonaws.com
+      APP_NAME: rpc-proxy
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # needed for git describe to find tags
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.ECR_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.ECR_AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image metadata
+        id: meta
+        run: |
+          SHORT_SHA=${GITHUB_SHA:0:7}
+          # Derive version from the nearest upstream tag (e.g. 0.0.62-2-g2fe6ca3)
+          BASE_VERSION=$(git describe --tags --always)
+          VERSION="custom-${BASE_VERSION}"
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            TAGS="dev latest"
+            DEPLOYMENT_ENV="dev"
+          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+            TAGS="prod"
+            DEPLOYMENT_ENV="prod"
+          else
+            # Use branch name as tag, sanitized for Docker tag format
+            TAGS=$(echo "$GITHUB_REF_NAME" | sed 's/[^a-zA-Z0-9._-]/-/g')
+            DEPLOYMENT_ENV=""
+          fi
+          # Build full Docker tags (registry/app:tag) for each tag + short SHA
+          DOCKER_TAGS=""
+          for T in $TAGS $SHORT_SHA; do
+            DOCKER_TAGS="${DOCKER_TAGS}${ECR_REGISTRY}/${APP_NAME}:${T}"$'\n'
+          done
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+          echo "deployment_env=$DEPLOYMENT_ENV" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "docker_tags<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$DOCKER_TAGS" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "Image version: $VERSION (tags: $TAGS)"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.docker_tags }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            COMMIT_SHA=${{ steps.meta.outputs.short_sha }}
+          cache-from: type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.APP_NAME }}:cache
+          cache-to: type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.APP_NAME }}:cache,mode=max
+
+      - name: Generate GitHub App token
+        if: ${{ steps.meta.outputs.deployment_env != '' }}
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: rhinestonewtf
+
+      - name: Promote image via infra workflow
+        if: ${{ steps.meta.outputs.deployment_env != '' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_WORKFLOW_OWNER: rhinestonewtf
+          GH_WORKFLOW_REPO: infra
+          WORKFLOW_FILE: aws-promote-app-version.yaml
+          DEPLOYMENT_ENV: ${{ steps.meta.outputs.deployment_env }}
+          SHORT_SHA: ${{ steps.meta.outputs.short_sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "GitHub App token was not generated (check APP_ID/APP_PRIVATE_KEY org secret access for this repo)" >&2
+            exit 1
+          fi
+
+          TARGET_REF="main"
+          WORKFLOW_PATH=".github/workflows/$WORKFLOW_FILE"
+
+          WORKFLOW_METADATA=$(gh api repos/$GH_WORKFLOW_OWNER/$GH_WORKFLOW_REPO/actions/workflows/$WORKFLOW_FILE)
+          WORKFLOW_ID=$(echo "$WORKFLOW_METADATA" | jq -r '.id // empty')
+
+          if [[ -z "$WORKFLOW_ID" ]]; then
+            echo "Unable to resolve workflow id for $WORKFLOW_PATH" >&2
+            exit 1
+          fi
+
+          echo "Dispatching $WORKFLOW_FILE (id: $WORKFLOW_ID) in $GH_WORKFLOW_OWNER/$GH_WORKFLOW_REPO for env $DEPLOYMENT_ENV (version $SHORT_SHA)"
+
+          API_ROOT="https://api.github.com"
+          DISPATCH_URL="$API_ROOT/repos/$GH_WORKFLOW_OWNER/$GH_WORKFLOW_REPO/actions/workflows/$WORKFLOW_FILE/dispatches"
+          AUTH_HEADER=(
+            -H "Authorization: Bearer $GH_TOKEN"
+            -H "Accept: application/vnd.github+json"
+            -H "Content-Type: application/json"
+          )
+
+          DISPATCH_BODY=$(jq -n \
+            --arg ref "$TARGET_REF" \
+            --arg env "$DEPLOYMENT_ENV" \
+            --arg app "$APP_NAME" \
+            --arg sha "$SHORT_SHA" \
+            '{ref: $ref, inputs: {env: $env, app_name: $app, version_sha: $sha}}')
+
+          DISPATCH_STATUS=$(curl -sS -o /tmp/dispatch.json -w "%{http_code}" "${AUTH_HEADER[@]}" \
+            -X POST "$DISPATCH_URL" \
+            -d "$DISPATCH_BODY")
+
+          if [[ "$DISPATCH_STATUS" -ge 300 ]]; then
+            echo "Failed to dispatch remote workflow (status $DISPATCH_STATUS)" >&2
+            cat /tmp/dispatch.json >&2 || true
+            exit 1
+          fi
+
+          echo "Awaiting workflow run to be created..."
+          sleep 10
+
+          RUN_ID=$(gh api https://api.github.com/repos/$GH_WORKFLOW_OWNER/$GH_WORKFLOW_REPO/actions/runs --jq '[.workflow_runs[] | select(.event == "workflow_dispatch")][0].id' | sed 's/\x1b\[[0-9;]*m//g')
+          echo "Run ID: $RUN_ID"
+
+          if [[ -z "$RUN_ID" ]]; then
+            echo "Failed to find the dispatched workflow run" >&2
+            exit 1
+          fi
+
+          gh run watch "$RUN_ID" --repo $GH_WORKFLOW_OWNER/$GH_WORKFLOW_REPO --exit-status --compact --interval 15
+
+      - name: Notify Slack of deployment
+        if: ${{ success() && steps.meta.outputs.deployment_env != '' }}
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+        run: |
+          if [[ -z "${SLACK_WEBHOOK:-}" ]]; then
+            echo "SLACK_WEBHOOK secret is not configured" >&2
+            exit 1
+          fi
+
+          MESSAGE=$(jq -n \
+            --arg text ":rocket: App *${{ env.APP_NAME }}* is live on *${{ steps.meta.outputs.deployment_env }}* version: *${{ steps.meta.outputs.short_sha }}*" \
+            '{text: $text}')
+
+          curl -sSf -X POST -H 'Content-type: application/json' --data "$MESSAGE" "$SLACK_WEBHOOK"
