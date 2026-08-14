@@ -1,0 +1,19 @@
+version: 0.2
+# Runs on the rpc-proxy amd64 CodeBuild project (terraform-aws/modules/codebuild-image-builder,
+# environments/shared/codebuild-erpc-fork.tf in rhinestonewtf/infra). Builds and pushes the
+# image natively, no QEMU.
+#
+# VERSION/COMMIT_SHA come from `git describe --tags` computed in the GH-hosted `prepare`
+# job (which has full git history) — CodeBuild builds from a zipped source with no .git,
+# so these can't be recomputed here. Passed in as CodeBuild environment overrides.
+
+phases:
+  pre_build:
+    commands:
+      - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+  build:
+    commands:
+      - docker build --build-arg VERSION="$VERSION" --build-arg COMMIT_SHA="$COMMIT_SHA" -t "$ECR_REGISTRY/$APP_NAME:$IMAGE_TAG-amd64" .
+  post_build:
+    commands:
+      - docker push "$ECR_REGISTRY/$APP_NAME:$IMAGE_TAG-amd64"
