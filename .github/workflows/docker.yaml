@@ -219,8 +219,16 @@ jobs:
             fi
           done
 
+      # Deliberately unconditional, NOT gated on skip_push (Kevin) — this repo's
+      # `release` branch can push the SAME short_sha main already built (a
+      # release cut of an already-deployed commit), which sets skip_push=true.
+      # `docker buildx imagetools create` only needs registry read/write (ECR
+      # login already happened above, unconditionally), not a local rebuild, so
+      # it can always point this run's requested tags (e.g. `prod`) at the
+      # already-pushed per-arch images. Gating it on skip_push left `prod`
+      # stale for exactly that reused-image case — the manifest step never ran,
+      # so promotion dispatched against an alias that was never created.
       - name: Create multi-arch manifest
-        if: needs.prepare.outputs.skip_push == 'false'
         run: |
           set -euo pipefail
           for TAG in ${{ needs.prepare.outputs.tags }}; do
