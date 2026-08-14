@@ -76,11 +76,25 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Image version: $VERSION (tags: $TAGS)"
 
+      # Checks the per-arch tags, NOT the bare short_sha (Kevin) — after this
+      # migration, the bare short_sha tag is only ever created as a manifest-
+      # list ALIAS pointing at the two per-arch images (see "Create multi-arch
+      # manifest" below), never a real build artifact on its own. It can also
+      # already exist for a commit built by the OLD single-arch workflow
+      # before this migration landed (no per-arch suffix at all). Either way,
+      # finding the bare tag doesn't prove $SHORT_SHA-amd64/-arm64 exist — a
+      # false skip_push=true here would make the manifest step fail instead of
+      # publishing the requested release alias. `describe-images` with
+      # multiple --image-ids fails the whole call (ImageNotFoundException) if
+      # ANY of them is missing, which is exactly the "skip only if BOTH exist"
+      # semantics wanted here.
       - name: Check whether this image already exists in ECR
         id: check-exists
         run: |
-          if aws ecr describe-images --repository-name "$APP_NAME" --image-ids imageTag=${{ steps.meta.outputs.short_sha }} &>/dev/null; then
-            echo "Image $APP_NAME:${{ steps.meta.outputs.short_sha }} already exists in ECR, skipping build"
+          if aws ecr describe-images --repository-name "$APP_NAME" \
+              --image-ids imageTag=${{ steps.meta.outputs.short_sha }}-amd64 imageTag=${{ steps.meta.outputs.short_sha }}-arm64 \
+              &>/dev/null; then
+            echo "Image $APP_NAME:${{ steps.meta.outputs.short_sha }} (both arches) already exists in ECR, skipping build"
             echo "skip_push=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip_push=false" >> "$GITHUB_OUTPUT"
