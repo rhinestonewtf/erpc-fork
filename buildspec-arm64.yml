@@ -1,0 +1,20 @@
+version: 0.2
+# Runs on the rpc-proxy arm64 CodeBuild project (ARM_CONTAINER, native). This repo has
+# never published an arm64 image before. `go build` (no explicit GOARCH override in the
+# Dockerfile) compiles for the host it runs on, so a native arm64 CodeBuild machine
+# produces a native arm64 binary automatically — verified locally, and all 4 pinned-by-
+# digest base images (golang, node, alpine, distroless) confirmed genuine multi-arch
+# manifest lists including linux/arm64/v8 via `docker buildx imagetools inspect`.
+#
+# See buildspec-amd64.yml for the VERSION/COMMIT_SHA build-arg explanation.
+
+phases:
+  pre_build:
+    commands:
+      - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+  build:
+    commands:
+      - docker build --build-arg VERSION="$VERSION" --build-arg COMMIT_SHA="$COMMIT_SHA" -t "$ECR_REGISTRY/$APP_NAME:$IMAGE_TAG-arm64" .
+  post_build:
+    commands:
+      - docker push "$ECR_REGISTRY/$APP_NAME:$IMAGE_TAG-arm64"

@@ -5,29 +5,50 @@ on:
     branches: ["main", "release"]
 
 jobs:
-  docker:
-    name: Build and push Docker image
+  # RHI-5507: native per-arch builds on AWS CodeBuild instead of a single-arch
+  # docker/build-push-action (no buildx multi-platform before this) — this is
+  # also this repo's first arm64 image. terraform-aws/modules/codebuild-image-builder,
+  # environments/shared/codebuild-erpc-fork.tf in rhinestonewtf/infra.
+  #
+  # This repository is public, which makes its Actions logs public too. Registry
+  # and role therefore come from secrets so their values are masked in log
+  # output, and mask-aws-account-id keeps the bare account ID out of the AWS
+  # steps — the account ID must never be hardcoded literally in this file.
+  #
+  # The `codebuild` job below duplicates (rather than calls) infra-workflows'
+  # shared aws-codebuild-release.yaml: GitHub does not allow a workflow in a
+  # PUBLIC repository to call a reusable workflow hosted in a PRIVATE one (RHI-5507,
+  # deposit-widget-proxy — confirmed live via `gh workflow run`, which 422'd with
+  # "workflow was not found" despite the file existing). So this job is a
+  # self-contained inline copy, simplified for this repo's fixed amd64+arm64 and
+  # soft-gate (fail_on_critical=false) case.
+  prepare:
+    name: Prepare build context and upload to S3
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+      tags: ${{ steps.meta.outputs.tags }}
+      deployment_env: ${{ steps.meta.outputs.deployment_env }}
+      version: ${{ steps.meta.outputs.version }}
+      skip_push: ${{ steps.check-exists.outputs.skip_push }}
     env:
       AWS_REGION: us-east-1
-      ECR_REGISTRY: 336594912921.dkr.ecr.us-east-1.amazonaws.com
+      ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
       APP_NAME: rpc-proxy
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0 # needed for git describe to find tags
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
-          aws-access-key-id: ${{ secrets.ECR_AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.ECR_AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.ECR_PUSH_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+          mask-aws-account-id: true
 
       - name: Set image metadata
         id: meta
@@ -47,37 +68,237 @@ jobs:
             TAGS=$(echo "$GITHUB_REF_NAME" | sed 's/[^a-zA-Z0-9._-]/-/g')
             DEPLOYMENT_ENV=""
           fi
-          # Build full Docker tags (registry/app:tag) for each tag + short SHA
-          DOCKER_TAGS=""
-          for T in $TAGS $SHORT_SHA; do
-            DOCKER_TAGS="${DOCKER_TAGS}${ECR_REGISTRY}/${APP_NAME}:${T}"$'\n'
-          done
-          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
-          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
-          echo "deployment_env=$DEPLOYMENT_ENV" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "docker_tags<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$DOCKER_TAGS" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          {
+            echo "short_sha=$SHORT_SHA"
+            echo "tags=$TAGS $SHORT_SHA"
+            echo "deployment_env=$DEPLOYMENT_ENV"
+            echo "version=$VERSION"
+          } >> "$GITHUB_OUTPUT"
           echo "Image version: $VERSION (tags: $TAGS)"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      # Checks the per-arch tags, NOT the bare short_sha (Kevin) — after this
+      # migration, the bare short_sha tag is only ever created as a manifest-
+      # list ALIAS pointing at the two per-arch images (see "Create multi-arch
+      # manifest" below), never a real build artifact on its own. It can also
+      # already exist for a commit built by the OLD single-arch workflow
+      # before this migration landed (no per-arch suffix at all). Either way,
+      # finding the bare tag doesn't prove $SHORT_SHA-amd64/-arm64 exist — a
+      # false skip_push=true here would make the manifest step fail instead of
+      # publishing the requested release alias. `describe-images` with
+      # multiple --image-ids fails the whole call (ImageNotFoundException) if
+      # ANY of them is missing, which is exactly the "skip only if BOTH exist"
+      # semantics wanted here.
+      - name: Check whether this image already exists in ECR
+        id: check-exists
+        run: |
+          if aws ecr describe-images --repository-name "$APP_NAME" \
+              --image-ids imageTag=${{ steps.meta.outputs.short_sha }}-amd64 imageTag=${{ steps.meta.outputs.short_sha }}-arm64 \
+              &>/dev/null; then
+            echo "Image $APP_NAME:${{ steps.meta.outputs.short_sha }} (both arches) already exists in ECR, skipping build"
+            echo "skip_push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip_push=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Build and push image
-        uses: docker/build-push-action@v6
+      # Derives the zip's exclude list from .dockerignore instead of hardcoding paths
+      # (Kevin, caught on the relayer migration, RHI-5507) — a hardcoded list would
+      # ship everything else .dockerignore keeps out of the image. This repo's own
+      # .dockerignore already excludes Dockerfile/.dockerignore themselves (fine for
+      # `docker build`, which reads the Dockerfile separately) — the carve-out below
+      # keeps them in THIS zip, which CodeBuild unpacks and runs `docker build .`
+      # inside (RHI-5507, deposit-service-processor #663).
+      - name: Zip build context
+        if: steps.check-exists.outputs.skip_push == 'false'
+        run: |
+          set -euo pipefail
+          BUILD_ESSENTIAL=('Dockerfile' '.dockerignore')
+          EXCLUDES=('.git/*')
+          if [[ -f .dockerignore ]]; then
+            while IFS= read -r pattern; do
+              pattern="${pattern%$'\r'}"
+              [[ -z "$pattern" || "$pattern" == \#* ]] && continue
+              pattern="${pattern#./}"
+              pattern="${pattern#/}"
+              keep=false
+              for essential in "${BUILD_ESSENTIAL[@]}"; do
+                # Glob match, not exact-string: a pattern like `Dockerfile*` would
+                # exclude Dockerfile too, but wouldn't equal the literal string
+                # "Dockerfile" (Kevin, RHI-5507, caught on user-service).
+                [[ "$essential" == $pattern ]] && keep=true && break
+              done
+              [[ "$keep" == true ]] && continue
+              EXCLUDES+=("$pattern")
+              [[ "$pattern" != *'*'* ]] && EXCLUDES+=("$pattern/*")
+            done < .dockerignore
+          fi
+          ARGS=()
+          for e in "${EXCLUDES[@]}"; do ARGS+=(-x "$e"); done
+          zip -qr /tmp/build-context.zip . "${ARGS[@]}"
+
+          for essential in "${BUILD_ESSENTIAL[@]}"; do
+            if [[ -f "$essential" ]] && ! unzip -l /tmp/build-context.zip "$essential" >/dev/null 2>&1; then
+              echo "::error::$essential is missing from the build context zip; CodeBuild cannot build without it"
+              exit 1
+            fi
+          done
+
+      - name: Upload build context to S3
+        if: steps.check-exists.outputs.skip_push == 'false'
+        # SOURCE_BUCKET is derived from the (masked) ECR_REGISTRY secret rather than
+        # hardcoded, since this repo is public.
+        run: |
+          SOURCE_BUCKET="$APP_NAME-codebuild-source-${ECR_REGISTRY%%.*}"
+          aws s3 cp /tmp/build-context.zip "s3://$SOURCE_BUCKET/$APP_NAME/${{ steps.meta.outputs.short_sha }}.zip"
+
+  codebuild:
+    name: Build, push and scan via CodeBuild
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    env:
+      AWS_REGION: us-east-1
+      ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
+      APP_NAME: rpc-proxy
+      SHORT_SHA: ${{ needs.prepare.outputs.short_sha }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.docker_tags }}
-          build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
-            COMMIT_SHA=${{ steps.meta.outputs.short_sha }}
-          cache-from: type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.APP_NAME }}:cache
-          cache-to: type=registry,ref=${{ env.ECR_REGISTRY }}/${{ env.APP_NAME }}:cache,mode=max
+          role-to-assume: ${{ secrets.ECR_PUSH_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
+      - id: login-ecr
+        uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2
 
+      # Only needed for the (cheap, no-emulation) imagetools manifest-list step below —
+      # each arch already built natively on its own CodeBuild project.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Start per-arch CodeBuild builds
+        id: start-builds
+        if: needs.prepare.outputs.skip_push == 'false'
+        run: |
+          set -euo pipefail
+          SOURCE_BUCKET="$APP_NAME-codebuild-source-${ECR_REGISTRY%%.*}"
+          SOURCE_LOCATION="$SOURCE_BUCKET/$APP_NAME/$SHORT_SHA.zip"
+          ENV_OVERRIDES=$(jq -cn \
+            --arg region "$AWS_REGION" \
+            --arg registry "$ECR_REGISTRY" \
+            --arg app "$APP_NAME" \
+            --arg tag "$SHORT_SHA" \
+            --arg version "$VERSION" \
+            --arg commit "$SHORT_SHA" \
+            '[
+              {"name":"AWS_REGION","value":$region},
+              {"name":"ECR_REGISTRY","value":$registry},
+              {"name":"APP_NAME","value":$app},
+              {"name":"IMAGE_TAG","value":$tag},
+              {"name":"VERSION","value":$version},
+              {"name":"COMMIT_SHA","value":$commit}
+            ]')
+          ALL_IDS=""
+          for arch in amd64 arm64; do
+            project="$APP_NAME-$arch"
+            build_id=$(aws codebuild start-build \
+              --project-name "$project" \
+              --source-location-override "$SOURCE_LOCATION" \
+              --buildspec-override "buildspec-$arch.yml" \
+              --environment-variables-override "$ENV_OVERRIDES" \
+              --query 'build.id' --output text)
+            echo "Started $project: $build_id"
+            ALL_IDS="$ALL_IDS $build_id"
+          done
+          echo "build_ids=$ALL_IDS" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for CodeBuild builds
+        if: needs.prepare.outputs.skip_push == 'false'
+        run: |
+          set -euo pipefail
+          ids="${{ steps.start-builds.outputs.build_ids }}"
+          echo "Waiting on: $ids"
+          statuses=""
+          while true; do
+            statuses=$(aws codebuild batch-get-builds --ids $ids --query 'builds[].buildStatus' --output text)
+            echo "Statuses: $statuses"
+            [[ "$statuses" != *IN_PROGRESS* ]] && break
+            sleep 15
+          done
+          for status in $statuses; do
+            if [[ "$status" != "SUCCEEDED" ]]; then
+              echo "One or more CodeBuild builds did not succeed: $statuses" >&2
+              aws codebuild batch-get-builds --ids $ids --query 'builds[].[id,buildStatus,logs.deepLink]' --output table
+              exit 1
+            fi
+          done
+
+      # Deliberately unconditional, NOT gated on skip_push (Kevin) — this repo's
+      # `release` branch can push the SAME short_sha main already built (a
+      # release cut of an already-deployed commit), which sets skip_push=true.
+      # `docker buildx imagetools create` only needs registry read/write (ECR
+      # login already happened above, unconditionally), not a local rebuild, so
+      # it can always point this run's requested tags (e.g. `prod`) at the
+      # already-pushed per-arch images. Gating it on skip_push left `prod`
+      # stale for exactly that reused-image case — the manifest step never ran,
+      # so promotion dispatched against an alias that was never created.
+      - name: Create multi-arch manifest
+        run: |
+          set -euo pipefail
+          for TAG in ${{ needs.prepare.outputs.tags }}; do
+            docker buildx imagetools create \
+              -t "$ECR_REGISTRY/$APP_NAME:$TAG" \
+              "$ECR_REGISTRY/$APP_NAME:$SHORT_SHA-amd64" \
+              "$ECR_REGISTRY/$APP_NAME:$SHORT_SHA-arm64"
+          done
+
+      - name: Install trivy
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+
+      # Scans only the base runtime image's immutable per-arch tags, never the
+      # multi-arch manifest tag (pulling a manifest list on this amd64 runner
+      # silently resolves to just the amd64 image) — RHI-5507,
+      # deposit-service-processor#653.
+      - name: Scan images (Trivy)
+        run: |
+          set -euo pipefail
+          for ARCH in amd64 arm64; do
+            trivy image \
+              --format json \
+              --output "trivy-base-$ARCH.json" \
+              --ignore-unfixed \
+              --severity CRITICAL,HIGH,MEDIUM,LOW \
+              --exit-code 0 \
+              "$ECR_REGISTRY/$APP_NAME:$SHORT_SHA-$ARCH"
+          done
+
+      # This repo never had a scan step before — soft-fail (report only, never block)
+      # so this migration adds visibility without introducing a new deploy-blocking
+      # gate as a side effect.
+      - name: Report Trivy findings
+        run: |
+          set -euo pipefail
+          for FILE in trivy-*.json; do
+            echo "## Trivy image scan summary ($FILE)" | tee -a "$GITHUB_STEP_SUMMARY"
+            jq -r '
+              [.Results[]?.Vulnerabilities[]?.Severity] | group_by(.) | map("\(.[0]): \(length)") | .[]
+            ' "$FILE" | tee -a "$GITHUB_STEP_SUMMARY" || echo "no vulnerabilities found"
+          done
+
+      - name: Upload Trivy reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: trivy-image-report
+          path: trivy-*.json
+
+  promote:
+    name: Promote and notify
+    needs: [prepare, codebuild]
+    if: needs.prepare.outputs.deployment_env != ''
+    runs-on: ubuntu-latest
+    steps:
       - name: Generate GitHub App token
-        if: ${{ steps.meta.outputs.deployment_env != '' }}
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -86,14 +307,13 @@ jobs:
           owner: rhinestonewtf
 
       - name: Promote image via infra workflow
-        if: ${{ steps.meta.outputs.deployment_env != '' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_WORKFLOW_OWNER: rhinestonewtf
           GH_WORKFLOW_REPO: infra
           WORKFLOW_FILE: aws-promote-app-version.yaml
-          DEPLOYMENT_ENV: ${{ steps.meta.outputs.deployment_env }}
-          SHORT_SHA: ${{ steps.meta.outputs.short_sha }}
+          DEPLOYMENT_ENV: ${{ needs.prepare.outputs.deployment_env }}
+          SHORT_SHA: ${{ needs.prepare.outputs.short_sha }}
         run: |
           set -euo pipefail
 
@@ -126,7 +346,7 @@ jobs:
           DISPATCH_BODY=$(jq -n \
             --arg ref "$TARGET_REF" \
             --arg env "$DEPLOYMENT_ENV" \
-            --arg app "$APP_NAME" \
+            --arg app "rpc-proxy" \
             --arg sha "$SHORT_SHA" \
             '{ref: $ref, inputs: {env: $env, app_name: $app, version_sha: $sha}}')
 
@@ -154,7 +374,7 @@ jobs:
           gh run watch "$RUN_ID" --repo $GH_WORKFLOW_OWNER/$GH_WORKFLOW_REPO --exit-status --compact --interval 15
 
       - name: Notify Slack of deployment
-        if: ${{ success() && steps.meta.outputs.deployment_env != '' }}
+        if: success()
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
         run: |
@@ -164,7 +384,7 @@ jobs:
           fi
 
           MESSAGE=$(jq -n \
-            --arg text ":rocket: App *${{ env.APP_NAME }}* is live on *${{ steps.meta.outputs.deployment_env }}* version: *${{ steps.meta.outputs.short_sha }}*" \
+            --arg text ":rocket: App *rpc-proxy* is live on *${{ needs.prepare.outputs.deployment_env }}* version: *${{ needs.prepare.outputs.short_sha }}*" \
             '{text: $text}')
 
           curl -sSf -X POST -H 'Content-type: application/json' --data "$MESSAGE" "$SLACK_WEBHOOK"
