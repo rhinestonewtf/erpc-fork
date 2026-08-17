@@ -3,6 +3,7 @@ name: Build and push Docker image
 on:
   push:
     branches: ["main", "release"]
+  workflow_dispatch:
 
 jobs:
   # RHI-5507: native per-arch builds on AWS CodeBuild instead of a single-arch
