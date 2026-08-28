@@ -41,6 +41,7 @@ grep -q "isTerminalGasLimitRejection" architecture/evm/error_normalizer.go && ec
 grep -q "terminalGasLimitRejections" architecture/evm/gas_limit_errors.go && echo OK
 grep -q 'strconv.ParseUint(s, 10, 64)' common/utils.go && echo OK
 grep -q '"wss://"' common/defaults.go && echo OK
+grep -q "pnpm@" Dockerfile && echo OK
 test -f erpc-prod.yaml && echo OK
 test -f buildspec-amd64.yml && echo OK
 test -f buildspec-arm64.yml && echo OK
@@ -67,6 +68,7 @@ around it.
 | `e4494947` fix(evm): treat gas-limit rejections as terminal, not retryable (RHI-6277, #6) | `architecture/evm/gas_limit_errors.go`, `architecture/evm/gas_limit_errors_test.go`, `architecture/evm/error_normalizer.go` | `isTerminalGasLimitRejection` present in `error_normalizer.go` |
 | `90800261` (part of "update prod config") base-10 EVM quantity tolerance | `common/utils.go` | `strconv.ParseUint(s, 10, 64)` in `common/utils.go` |
 | `90800261` (part of "update prod config") treat `ws://`/`wss://` endpoints as providers | `common/defaults.go` | `"wss://"` in `common/defaults.go` |
+| `8abdf895` fix(docker): pin pnpm to the packageManager version (#7) | `Dockerfile` | `pnpm@` in `Dockerfile` (i.e. a version, not bare `pnpm`) |
 
 **RHI-6277 — gas-limit rejections are terminal.** A rejection of the transaction's gas
 limit is classified `ErrEndpointExecutionException` and **not** marked retryable toward
@@ -86,6 +88,21 @@ contradict upstream #1094. If it lands upstream, delete this patch rather than c
 `error_normalizer.go` can conflict. It **must stay above** the `-32003` /
 `"out of gas"` branch — if a rebase moves it below, the tests fail rather than
 silently regressing.
+
+**pnpm pin.** `Dockerfile` installed pnpm unpinned (`npm install -g pnpm`), so the build
+took whatever version was newest that day. pnpm 11 verifies the package-manager identity
+against the lockfile and aborts with `ERR_PNPM_PNPM_ENGINE_IDENTITY_UNVERIFIABLE`, since
+`@pnpm/exe.<platform>` is absent from a `lockfileVersion: 9` file written by pnpm 10 — so
+every image build broke on a repo where nothing had changed. Now pinned to the version
+`package.json` already declares as `packageManager`; **the two must stay in step.** Also
+drops the duplicate install in `ts-dev`, which derives `FROM ts-core`.
+
+*Upstreamable:* yes, and it should go up — upstream `main` has the same unpinned install
+and the fix has no fork-specific content. Every other base image here is digest-pinned.
+
+*Rebase risk:* low, but note the probe only checks that a version is pinned at all. If
+upstream bumps `packageManager` in `package.json`, the pin must be bumped with it or
+`--frozen-lockfile` will fail on a version mismatch instead.
 
 **Base-10 quantity tolerance.** Some upstreams return EVM quantities as base-10 strings
 instead of `0x`-prefixed hex, which broke upstream health tracking. `HexToUint64` /
