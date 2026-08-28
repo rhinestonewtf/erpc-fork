@@ -1,8 +1,12 @@
 # Fork patch list
 
 Every change this fork carries on top of upstream `erpc/erpc`. **This file is the
-source of truth for what "our patches" are.** If you add a patch, add it here in the
-same commit; if you drop one, move it to [Removed](#removed-patches) with the reason.
+source of truth for what "our patches" are.**
+
+Workflow: the patch itself goes in through a PR and is squash-merged; its row here is
+then committed **directly to `main`**, because the squash hash does not exist until
+after the merge. If you drop a patch, move it to [Removed](#removed-patches) with the
+reason.
 
 Currently rebased onto upstream **`0.1.2`** (`803b67d8`, released 2026-08-05).
 
@@ -42,6 +46,8 @@ test -f buildspec-amd64.yml && echo OK
 test -f buildspec-arm64.yml && echo OK
 test -f .github/workflows/docker.yaml && echo OK
 test -f promote-to-prod.sh && echo OK
+test -f PATCH_LIST.md && echo OK
+grep -q "This is a fork" CLAUDE.md && echo OK
 ```
 
 A rebase that reports success while a probe fails means the patch was dropped during
@@ -58,7 +64,7 @@ around it.
 
 | Patch | Files | Probe |
 | -- | -- | -- |
-| `1f253096` fix(evm): treat gas-limit rejections as terminal, not retryable (RHI-6277) | `architecture/evm/gas_limit_errors.go`, `architecture/evm/gas_limit_errors_test.go`, `architecture/evm/error_normalizer.go` | `isTerminalGasLimitRejection` present in `error_normalizer.go` |
+| `e4494947` fix(evm): treat gas-limit rejections as terminal, not retryable (RHI-6277, #6) | `architecture/evm/gas_limit_errors.go`, `architecture/evm/gas_limit_errors_test.go`, `architecture/evm/error_normalizer.go` | `isTerminalGasLimitRejection` present in `error_normalizer.go` |
 | `90800261` (part of "update prod config") base-10 EVM quantity tolerance | `common/utils.go` | `strconv.ParseUint(s, 10, 64)` in `common/utils.go` |
 | `90800261` (part of "update prod config") treat `ws://`/`wss://` endpoints as providers | `common/defaults.go` | `"wss://"` in `common/defaults.go` |
 
@@ -102,6 +108,17 @@ as needing provider conversion; they don't.
 | `3c8bdf46` Add promote-to-prod script | `promote-to-prod.sh`, `release.sh`, `sync-with-upstream.sh` |
 | `a75101a2` feat(ci): CodeBuild multi-arch images (RHI-5507, #4) | `buildspec-amd64.yml`, `buildspec-arm64.yml`, `.github/workflows/docker.yaml` |
 | `31a060e5` ci: `workflow_dispatch` trigger (RHI-5509, #5) | `.github/workflows/docker.yaml` |
+
+### This file
+
+| Patch | Files | Probe |
+| -- | -- | -- |
+| `e4494947` docs: the patch register itself (#6) | `PATCH_LIST.md`, `CLAUDE.md` | `test -f PATCH_LIST.md`, and `grep -q "This is a fork" CLAUDE.md` |
+
+Listed because it is a fork-only file and can be dropped by a sync like any other patch —
+and losing it loses the ability to detect that anything else was dropped. `CLAUDE.md` is
+upstream's file with our section appended, so a rebase may conflict there: keep the
+appended section and take upstream's version of the rest.
 
 ## Removed patches
 
