@@ -16,9 +16,11 @@ of what we carry and the source of truth for it.
 - **Never rebuild `main` by resetting to an upstream ref and cherry-picking** what you
   remember. Rebase, or replay from PATCH_LIST.md and verify every probe.
 - **Adding a fork patch**: put the logic in a NEW file with a minimal call site in the
-  upstream file, so a rebase can only conflict on a few lines; add a row to
-  PATCH_LIST.md in the same commit, with a probe and a note on whether it is
-  upstreamable; add a test that fails if the patch is dropped or reordered.
+  upstream file, so a rebase can only conflict on a few lines, and add a test that fails
+  if the patch is dropped or reordered. The patch goes in as a PR, squash-merged; then
+  commit its PATCH_LIST.md row — probe, upstreamable-or-not, rebase risk — **directly to
+  `main`**, since the squash hash only exists once the PR is merged. A patch is not
+  finished until that row is in.
 - **Before writing a patch**, check whether upstream already fixed it: read
   `git log <our base>..upstream/main -- <the files>` and the open upstream PRs. Two of
   our patches turned out to be superseded upstream.
