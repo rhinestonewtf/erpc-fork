@@ -378,6 +378,25 @@ func ExtractJsonRpcError(r *http.Response, nr *common.NormalizedResponse, jr *co
 		}
 
 		//----------------------------------------------------------------
+		// FORK PATCH (RHI-6277): gas-limit rejections are terminal
+		// Must stay ABOVE the "transaction rejected" branch below, which would
+		// otherwise mark these retryable toward other upstreams. See
+		// gas_limit_errors.go for the reasoning and PATCH_LIST.md for the patch set.
+		//----------------------------------------------------------------
+
+		if isTerminalGasLimitRejection(msg) {
+			return common.NewErrEndpointExecutionException(
+				common.NewErrJsonRpcExceptionInternal(
+					int(code),
+					common.JsonRpcErrorTransactionRejected,
+					err.Message,
+					nil,
+					details,
+				),
+			)
+		}
+
+		//----------------------------------------------------------------
 		// "Transaction rejected" or "out of gas" errors
 		// Note: This comes AFTER nonce/duplicate detection to avoid masking those errors.
 		//----------------------------------------------------------------
