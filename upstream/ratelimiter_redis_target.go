@@ -5,27 +5,31 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/erpc/erpc/common"
 )
 
 // rateLimiterRedisTarget is what envoyproxy/ratelimit's NewClientImpl actually
-// takes: a bare host:port, an optional "user:pass" auth string, and TLS as a
-// flag plus config. It has never accepted a URI (its own settings are
-// REDIS_URL, REDIS_AUTH and REDIS_TLS, separately), and radix v3, which it
-// dials through, only recognises the redis:// scheme and never turns TLS on
-// from a URL. Upstream eRPC hands Store.Redis.URI to it verbatim, so a
-// rediss://user:pass@host:port URI is used as a TCP address, the dial fails,
+// takes: an address radix can dial, plus TLS as a flag and config. radix v3
+// accepts a redis:// URL as the address and applies the credentials and the
+// /N (or ?db=N) database from it itself, but it only recognises the redis://
+// scheme and never turns TLS on from a URL. Upstream eRPC hands
+// Store.Redis.URI through verbatim, so a rediss://user:pass@host:port URI is
+// used as a raw TCP address ("too many colons in address"), the dial fails,
 // and every budget on the store fail-opens for the life of the process, with
 // nothing logged above Warn.
 //
-// Fork patch (RHI-6529): resolve the connector config into those pieces here,
-// so `uri: rediss://...` works for the rate limiter the way it already does
-// for the cache and shared-state connectors (which parse it via go-redis).
+// Fork patch (RHI-6529): normalise the connector config into a redis:// URL
+// so radix keeps doing AUTH/SELECT exactly as before, and lift TLS out of the
+// scheme into envoy's dialer flag. `uri: rediss://...` then works for the rate
+// limiter the way it already does for the cache and shared-state connectors.
 type rateLimiterRedisTarget struct {
+	// Addr is a redis:// URL (never rediss://). Credentials and DB stay in it
+	// for radix; envoy's separate auth argument must remain empty or it would
+	// override them.
 	Addr      string
-	Auth      string
 	UseTLS    bool
 	TLSConfig *tls.Config
 }
@@ -46,41 +50,38 @@ func resolveRateLimiterRedisTarget(cfg *common.RedisConnectorConfig) (*rateLimit
 		UseTLS: cfg.TLS != nil && cfg.TLS.Enabled,
 	}
 
+	var u *url.URL
 	if strings.Contains(raw, "://") {
-		u, err := url.Parse(raw)
+		parsed, err := url.Parse(raw)
 		if err != nil {
 			return nil, fmt.Errorf("rate-limiter redis: parse uri: %w", err)
 		}
-		switch u.Scheme {
+		switch parsed.Scheme {
 		case "redis":
 		case "rediss":
 			t.UseTLS = true
 		default:
-			return nil, fmt.Errorf("rate-limiter redis: unsupported scheme %q (want redis:// or rediss://)", u.Scheme)
+			return nil, fmt.Errorf("rate-limiter redis: unsupported scheme %q (want redis:// or rediss://)", parsed.Scheme)
 		}
-		if u.Host == "" {
+		if parsed.Host == "" {
 			return nil, fmt.Errorf("rate-limiter redis: uri has no host")
 		}
-		t.Addr = withDefaultRedisPort(u.Host)
-		if u.User != nil {
-			// Password() percent-decodes, which is what both our SetDefaults
-			// (url.UserPassword) and any URI-producing tool apply on the way in.
-			pass, _ := u.User.Password()
-			t.Auth = joinRedisAuth(u.User.Username(), pass)
-		}
-		// envoy's client has no SELECT hook, so a non-default DB would be
-		// silently ignored and counters would land in db 0 anyway. Refuse
-		// rather than count against a keyspace the operator did not name.
-		if db := strings.TrimPrefix(u.Path, "/"); db != "" && db != "0" {
-			return nil, fmt.Errorf("rate-limiter redis: db %q in uri is not supported by the rate limiter store (only db 0)", db)
-		}
+		u = parsed
+		u.Scheme = "redis"
+		u.Host = withDefaultRedisPort(u.Host)
 	} else {
-		if cfg.DB != 0 {
-			return nil, fmt.Errorf("rate-limiter redis: db %d is not supported by the rate limiter store (only db 0)", cfg.DB)
+		// A bare host:port normally never reaches here (SetDefaults rewrites
+		// the discrete fields into a URI), but keep it equivalent: carry the
+		// credentials and DB in the URL so radix applies them the same way.
+		u = &url.URL{Scheme: "redis", Host: withDefaultRedisPort(raw)}
+		if cfg.Username != "" || cfg.Password != "" {
+			u.User = url.UserPassword(cfg.Username, cfg.Password)
 		}
-		t.Addr = withDefaultRedisPort(raw)
-		t.Auth = joinRedisAuth(cfg.Username, cfg.Password)
+		if cfg.DB != 0 {
+			u.Path = "/" + strconv.Itoa(cfg.DB)
+		}
 	}
+	t.Addr = u.String()
 
 	if t.UseTLS {
 		if cfg.TLS != nil {
@@ -92,21 +93,12 @@ func resolveRateLimiterRedisTarget(cfg *common.RedisConnectorConfig) (*rateLimit
 			}
 			t.TLSConfig = tlsCfg
 		} else {
-			// System roots; ServerName is filled from Addr by crypto/tls.
+			// System roots; ServerName is filled from the host by crypto/tls.
 			t.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 		}
 	}
 
 	return t, nil
-}
-
-// joinRedisAuth renders credentials in the form envoy's dialer expects:
-// "user:pass" selects AUTH <user> <pass>, a bare string selects AUTH <pass>.
-func joinRedisAuth(user, pass string) string {
-	if user != "" {
-		return user + ":" + pass
-	}
-	return pass
 }
 
 func withDefaultRedisPort(hostport string) string {

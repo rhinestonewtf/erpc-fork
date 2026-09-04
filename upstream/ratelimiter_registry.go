@@ -120,8 +120,10 @@ func (r *RateLimitersRegistry) connectRedisTask(ctx context.Context) (err error)
 			return fmt.Errorf("rate-limiter redis IAM connect: %w", err)
 		}
 	} else {
-		// Fork patch (RHI-6529): envoy wants host:port + "user:pass" + a TLS
-		// flag, never a URI. See ratelimiter_redis_target.go.
+		// Fork patch (RHI-6529): radix only dials redis:// URLs and never
+		// enables TLS from the scheme. See ratelimiter_redis_target.go.
+		// Auth stays empty: credentials travel in the URL and envoy's auth
+		// argument would override them.
 		target, terr := resolveRateLimiterRedisTarget(r.cfg.Store.Redis)
 		if terr != nil {
 			return terr
@@ -129,7 +131,7 @@ func (r *RateLimitersRegistry) connectRedisTask(ctx context.Context) (err error)
 		client = redis.NewClientImpl(
 			store.Scope("erpc_rl"),
 			target.UseTLS,
-			target.Auth,
+			"",
 			"tcp",
 			"single",
 			target.Addr,

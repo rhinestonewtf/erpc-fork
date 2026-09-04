@@ -23,74 +23,72 @@ import (
 )
 
 func TestResolveRateLimiterRedisTarget(t *testing.T) {
+	type want struct {
+		host     string
+		user     string
+		pass     string
+		path     string
+		rawQuery string
+		tls      bool
+	}
 	tests := []struct {
-		name     string
-		cfg      *common.RedisConnectorConfig
-		wantAddr string
-		wantAuth string
-		wantTLS  bool
-		wantErr  string
+		name    string
+		cfg     *common.RedisConnectorConfig
+		want    want
+		wantErr string
 	}{
 		{
 			// The shape our ElastiCache module emits: ACL user, url-encoded password, TLS.
-			name:     "rediss uri with encoded credentials",
-			cfg:      &common.RedisConnectorConfig{URI: "rediss://redis-admin:p%40ss%3Aword@host.cache.amazonaws.com:6379"},
-			wantAddr: "host.cache.amazonaws.com:6379",
-			wantAuth: "redis-admin:p@ss:word",
-			wantTLS:  true,
+			name: "rediss uri with encoded credentials",
+			cfg:  &common.RedisConnectorConfig{URI: "rediss://redis-admin:p%40ss%3Aword@host.cache.amazonaws.com:6379"},
+			want: want{host: "host.cache.amazonaws.com:6379", user: "redis-admin", pass: "p@ss:word", tls: true},
 		},
 		{
 			// What RedisConnectorConfig.SetDefaults builds from discrete fields.
-			name:     "rediss uri with db 0 path",
-			cfg:      &common.RedisConnectorConfig{URI: "rediss://u:p@host:6379/0"},
-			wantAddr: "host:6379",
-			wantAuth: "u:p",
-			wantTLS:  true,
+			name: "rediss uri with db 0 path",
+			cfg:  &common.RedisConnectorConfig{URI: "rediss://u:p@host:6379/0"},
+			want: want{host: "host:6379", user: "u", pass: "p", path: "/0", tls: true},
 		},
 		{
-			name:     "redis uri without credentials",
-			cfg:      &common.RedisConnectorConfig{URI: "redis://localhost:6380"},
-			wantAddr: "localhost:6380",
+			// Non-zero DB must survive: radix SELECTs it from the URL path.
+			name: "rediss uri with db path",
+			cfg:  &common.RedisConnectorConfig{URI: "rediss://u:p@host:6379/2"},
+			want: want{host: "host:6379", user: "u", pass: "p", path: "/2", tls: true},
 		},
 		{
-			name:     "redis uri password only",
-			cfg:      &common.RedisConnectorConfig{URI: "redis://:secret@localhost:6379"},
-			wantAddr: "localhost:6379",
-			wantAuth: "secret",
+			name: "redis uri with db query",
+			cfg:  &common.RedisConnectorConfig{URI: "redis://host:6379?db=3"},
+			want: want{host: "host:6379", rawQuery: "db=3"},
 		},
 		{
-			name:     "uri without port defaults to 6379",
-			cfg:      &common.RedisConnectorConfig{URI: "rediss://host"},
-			wantAddr: "host:6379",
-			wantTLS:  true,
+			name: "redis uri without credentials",
+			cfg:  &common.RedisConnectorConfig{URI: "redis://localhost:6380"},
+			want: want{host: "localhost:6380"},
 		},
 		{
-			name:     "tls.enabled forces TLS on a plain redis uri",
-			cfg:      &common.RedisConnectorConfig{URI: "redis://host:6379", TLS: &common.TLSConfig{Enabled: true}},
-			wantAddr: "host:6379",
-			wantTLS:  true,
+			name: "redis uri password only",
+			cfg:  &common.RedisConnectorConfig{URI: "redis://:secret@localhost:6379"},
+			want: want{host: "localhost:6379", pass: "secret"},
 		},
 		{
-			name:     "bare addr with discrete fields",
-			cfg:      &common.RedisConnectorConfig{Addr: "host:6379", Username: "u", Password: "p", TLS: &common.TLSConfig{Enabled: true}},
-			wantAddr: "host:6379",
-			wantAuth: "u:p",
-			wantTLS:  true,
+			name: "uri without port defaults to 6379",
+			cfg:  &common.RedisConnectorConfig{URI: "rediss://host"},
+			want: want{host: "host:6379", tls: true},
 		},
 		{
-			name:     "bare addr plaintext",
-			cfg:      &common.RedisConnectorConfig{Addr: "host:6379"},
-			wantAddr: "host:6379",
+			name: "tls.enabled forces TLS on a plain redis uri",
+			cfg:  &common.RedisConnectorConfig{URI: "redis://host:6379", TLS: &common.TLSConfig{Enabled: true}},
+			want: want{host: "host:6379", tls: true},
 		},
 		{
-			name:    "non-zero db in uri is refused",
-			cfg:     &common.RedisConnectorConfig{URI: "redis://host:6379/2"},
-			wantErr: "only db 0",
+			name: "bare addr with discrete fields and db",
+			cfg:  &common.RedisConnectorConfig{Addr: "host:6379", Username: "u", Password: "p", DB: 3, TLS: &common.TLSConfig{Enabled: true}},
+			want: want{host: "host:6379", user: "u", pass: "p", path: "/3", tls: true},
 		},
 		{
-			name:    "non-zero db field is refused",
-			cfg:     &common.RedisConnectorConfig{Addr: "host:6379", DB: 3},
-			wantErr: "only db 0",
+			name: "bare addr plaintext",
+			cfg:  &common.RedisConnectorConfig{Addr: "host:6379"},
+			want: want{host: "host:6379"},
 		},
 		{
 			name:    "unsupported scheme",
@@ -113,10 +111,20 @@ func TestResolveRateLimiterRedisTarget(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, tc.wantAddr, got.Addr)
-			assert.Equal(t, tc.wantAuth, got.Auth)
-			assert.Equal(t, tc.wantTLS, got.UseTLS)
-			if tc.wantTLS {
+
+			u, err := url.Parse(got.Addr)
+			require.NoError(t, err)
+			// radix v3 only parses this scheme; TLS travels separately.
+			assert.Equal(t, "redis", u.Scheme)
+			assert.Equal(t, tc.want.host, u.Host)
+			assert.Equal(t, tc.want.user, u.User.Username())
+			pass, _ := u.User.Password()
+			assert.Equal(t, tc.want.pass, pass)
+			assert.Equal(t, tc.want.path, u.Path)
+			assert.Equal(t, tc.want.rawQuery, u.RawQuery)
+
+			assert.Equal(t, tc.want.tls, got.UseTLS)
+			if tc.want.tls {
 				require.NotNil(t, got.TLSConfig, "TLS on needs a config for envoy's dialer")
 			} else {
 				assert.Nil(t, got.TLSConfig)
@@ -137,10 +145,10 @@ func TestResolveRateLimiterRedisTarget(t *testing.T) {
 }
 
 // TestRateLimitersRegistry_RedissURI_SharedCounter is the behavioural guard for
-// the fork patch: a rediss:// URI with ACL credentials must produce a store
-// that actually enforces. Without the patch envoy dials the URI as a TCP
-// address, the connect fails, getCache() stays nil and every permit is
-// granted, so the Eventually below times out.
+// the fork patch: a rediss:// URI with ACL credentials and a non-default DB must
+// produce a store that actually enforces, in that DB. Without the patch envoy
+// dials the URI as a TCP address, the connect fails, getCache() stays nil and
+// every permit is granted, so the Eventually below times out.
 func TestRateLimitersRegistry_RedissURI_SharedCounter(t *testing.T) {
 	srv, err := miniredis.RunTLS(&tls.Config{
 		Certificates: []tls.Certificate{selfSignedTestCert(t)},
@@ -154,6 +162,7 @@ func TestRateLimitersRegistry_RedissURI_SharedCounter(t *testing.T) {
 		Scheme: "rediss",
 		User:   url.UserPassword("limiter", "s3cr:et"),
 		Host:   srv.Addr(),
+		Path:   "/2",
 	}
 	cfg := &common.RateLimiterConfig{
 		Store: &common.RateLimitStoreConfig{
@@ -193,7 +202,8 @@ func TestRateLimitersRegistry_RedissURI_SharedCounter(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 3, allowed, "4th permit in the window must be refused by the remote counter")
-	assert.NotEmpty(t, srv.Keys(), "counters must live in Redis, not in-process")
+	assert.NotEmpty(t, srv.DB(2).Keys(), "counters must live in the DB named by the URI")
+	assert.Empty(t, srv.DB(0).Keys(), "nothing may leak into DB 0")
 }
 
 func selfSignedTestCert(t *testing.T) tls.Certificate {
