@@ -42,6 +42,7 @@ grep -q "terminalGasLimitRejections" architecture/evm/gas_limit_errors.go && ech
 grep -q 'strconv.ParseUint(s, 10, 64)' common/utils.go && echo OK
 grep -q '"wss://"' common/defaults.go && echo OK
 grep -q "pnpm@" Dockerfile && echo OK
+grep -q "resolveRateLimiterRedisTarget" upstream/ratelimiter_registry.go && echo OK
 test -f erpc-prod.yaml && echo OK
 test -f buildspec-amd64.yml && echo OK
 test -f buildspec-arm64.yml && echo OK
@@ -69,6 +70,7 @@ around it.
 | `90800261` (part of "update prod config") base-10 EVM quantity tolerance | `common/utils.go` | `strconv.ParseUint(s, 10, 64)` in `common/utils.go` |
 | `90800261` (part of "update prod config") treat `ws://`/`wss://` endpoints as providers | `common/defaults.go` | `"wss://"` in `common/defaults.go` |
 | `8abdf895` fix(docker): pin pnpm to the packageManager version (#7) | `Dockerfile` | `pnpm@` in `Dockerfile` (i.e. a version, not bare `pnpm`) |
+| `64b47f8d` fix(ratelimiter): parse rediss:// URI for the Redis store (RHI-6529, #9) | `upstream/ratelimiter_redis_target.go`, `upstream/ratelimiter_redis_target_test.go`, `upstream/ratelimiter_registry.go` | `resolveRateLimiterRedisTarget` called in `ratelimiter_registry.go` |
 
 **RHI-6277 — gas-limit rejections are terminal.** A rejection of the transaction's gas
 limit is classified `ErrEndpointExecutionException` and **not** marked retryable toward
@@ -103,6 +105,29 @@ and the fix has no fork-specific content. Every other base image here is digest-
 *Rebase risk:* low, but note the probe only checks that a version is pinned at all. If
 upstream bumps `packageManager` in `package.json`, the pin must be bumped with it or
 `--frozen-lockfile` will fail on a version mismatch instead.
+
+**RHI-6529 — `rediss://` URI for the Redis rate-limiter store.** Upstream hands
+`rateLimiters.store.redis.uri` verbatim to envoyproxy/ratelimit's `NewClientImpl`, which
+uses it as the dial address and takes TLS and auth as separate arguments. radix v3
+underneath parses `redis://` URLs (credentials, `/N` db) but not `rediss://`, so a TLS URI
+of the shape our ElastiCache module emits is dialled as a raw TCP address (`too many
+colons in address`), the connect is retried in the background forever, and **every budget
+on the store fail-opens** for the life of the process — logged at Warn only, which prod's
+`logLevel: error` never prints. There is no config-only workaround: the discrete
+`addr`/`username`/`password`/`tls.enabled` form is rebuilt into the same URI by
+`SetDefaults`. The patch normalises the connector into a `redis://` URL (credentials, path
+and query untouched, so radix keeps doing AUTH and SELECT) and lifts TLS out of the scheme
+into envoy's dialer flag plus a `tls.Config` that honours the `tls` block when present.
+
+*Upstreamable:* yes — upstream `main` has the identical code and no issue or PR for it
+(checked 2026-09-04); the only TLS ElastiCache path upstream ever exercised is the IAM one
+(#952), which side-steps envoy's client. If it lands upstream, delete this patch.
+
+*Rebase risk:* low. The logic is in its own file; only the ~20-line call site in
+`connectRedisTask` can conflict. Keep envoy's auth argument **empty** there — credentials
+travel in the URL and envoy's argument would override them. The miniredis-over-TLS test
+(`TestRateLimitersRegistry_RedissURI_SharedCounter`) fails on the unpatched call site, so
+a dropped patch shows up as a test failure, not a silent fail-open.
 
 **Base-10 quantity tolerance.** Some upstreams return EVM quantities as base-10 strings
 instead of `0x`-prefixed hex, which broke upstream health tracking. `HexToUint64` /
