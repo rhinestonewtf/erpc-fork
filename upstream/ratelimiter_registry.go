@@ -125,20 +125,28 @@ func (r *RateLimitersRegistry) connectRedisTask(ctx context.Context) (err error)
 			return fmt.Errorf("rate-limiter redis IAM connect: %w", err)
 		}
 	} else {
+		// Fork patch (RHI-6529): radix only dials redis:// URLs and never
+		// enables TLS from the scheme. See ratelimiter_redis_target.go.
+		// Auth stays empty: credentials travel in the URL and envoy's auth
+		// argument would override them.
+		target, terr := resolveRateLimiterRedisTarget(r.cfg.Store.Redis)
+		if terr != nil {
+			return terr
+		}
 		client = redis.NewClientImpl(
 			store.Scope("erpc_rl"),
-			useTLS,
-			r.cfg.Store.Redis.Username,
+			target.UseTLS,
+			"",
 			"tcp",
 			"single",
-			url,
+			target.Addr,
 			poolSize,
 			// No implicit pipelining: each check is already one explicit
 			// pipeline, and radix's window would only delay it (5ms window
 			// measured +23ms per 4-command check).
 			0,
 			0,
-			nil,
+			target.TLSConfig,
 			false,
 			nil,
 		)
