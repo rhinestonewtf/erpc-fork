@@ -8,7 +8,7 @@ then committed **directly to `main`**, because the squash hash does not exist un
 after the merge. If you drop a patch, move it to [Removed](#removed-patches) with the
 reason.
 
-Currently rebased onto upstream **`0.1.2`** (`803b67d8`, released 2026-08-05).
+Currently rebased onto upstream **`0.2.0`** (`8b87fa33`, released 2026-08-31).
 
 ## Why this file exists
 
@@ -23,7 +23,7 @@ Currently rebased onto upstream **`0.1.2`** (`803b67d8`, released 2026-08-05).
   dropped a merged code fix two days after it landed, and nobody noticed for six months,
   because the working mental model was "our patches are the CI and config ones".
 
-That last point is why `90800261` deserves a warning: it is named *"update prod
+That last point is why `343d9615` deserves a warning: it is named *"update prod
 config"* but also carries two Go code patches. Do not assume a commit's subject tells
 you whether it touches code.
 
@@ -66,11 +66,11 @@ around it.
 
 | Patch | Files | Probe |
 | -- | -- | -- |
-| `e4494947` fix(evm): treat gas-limit rejections as terminal, not retryable (RHI-6277, #6) | `architecture/evm/gas_limit_errors.go`, `architecture/evm/gas_limit_errors_test.go`, `architecture/evm/error_normalizer.go` | `isTerminalGasLimitRejection` present in `error_normalizer.go` |
-| `90800261` (part of "update prod config") base-10 EVM quantity tolerance | `common/utils.go` | `strconv.ParseUint(s, 10, 64)` in `common/utils.go` |
-| `90800261` (part of "update prod config") treat `ws://`/`wss://` endpoints as providers | `common/defaults.go` | `"wss://"` in `common/defaults.go` |
-| `8abdf895` fix(docker): pin pnpm to the packageManager version (#7) | `Dockerfile` | `pnpm@` in `Dockerfile` (i.e. a version, not bare `pnpm`) |
-| `64b47f8d` fix(ratelimiter): parse rediss:// URI for the Redis store (RHI-6529, #9) | `upstream/ratelimiter_redis_target.go`, `upstream/ratelimiter_redis_target_test.go`, `upstream/ratelimiter_registry.go` | `resolveRateLimiterRedisTarget` called in `ratelimiter_registry.go` |
+| `6d5bdcea` fix(evm): treat gas-limit rejections as terminal, not retryable (RHI-6277, #6) | `architecture/evm/gas_limit_errors.go`, `architecture/evm/gas_limit_errors_test.go`, `architecture/evm/error_normalizer.go` | `isTerminalGasLimitRejection` present in `error_normalizer.go` |
+| `343d9615` (part of "update prod config") base-10 EVM quantity tolerance | `common/utils.go` | `strconv.ParseUint(s, 10, 64)` in `common/utils.go` |
+| `343d9615` (part of "update prod config") treat `ws://`/`wss://` endpoints as providers | `common/defaults.go` | `"wss://"` in `common/defaults.go` |
+| `8235a081` fix(docker): pin pnpm to the packageManager version (#7) | `Dockerfile` | `pnpm@` in `Dockerfile` (i.e. a version, not bare `pnpm`) |
+| `07d0100b` fix(ratelimiter): parse rediss:// URI for the Redis store (RHI-6529, #9) | `upstream/ratelimiter_redis_target.go`, `upstream/ratelimiter_redis_target_test.go`, `upstream/ratelimiter_registry.go` | `resolveRateLimiterRedisTarget` called in `ratelimiter_registry.go` |
 
 **RHI-6277 — gas-limit rejections are terminal.** A rejection of the transaction's gas
 limit is classified `ErrEndpointExecutionException` and **not** marked retryable toward
@@ -144,18 +144,18 @@ as needing provider conversion; they don't.
 
 | Patch | What |
 | -- | -- |
-| `90800261` update prod config | `erpc-prod.yaml` — the production network/upstream config |
-| `d620ce1f` Cleanup workflows | deletes upstream's CI (benchmark, codeql, dependency-review, release, scorecards, test) |
-| `decddca5` Setup minimal CI | our own minimal workflow set |
-| `3c8bdf46` Add promote-to-prod script | `promote-to-prod.sh`, `release.sh`, `sync-with-upstream.sh` |
-| `a75101a2` feat(ci): CodeBuild multi-arch images (RHI-5507, #4) | `buildspec-amd64.yml`, `buildspec-arm64.yml`, `.github/workflows/docker.yaml` |
-| `31a060e5` ci: `workflow_dispatch` trigger (RHI-5509, #5) | `.github/workflows/docker.yaml` |
+| `343d9615` update prod config | `erpc-prod.yaml` — the production network/upstream config |
+| `e8074900` Cleanup workflows | deletes upstream's CI (benchmark, codeql, dependency-review, release, scorecards, test) |
+| `2c08bb2d` Setup minimal CI | our own minimal workflow set |
+| `700e2a90` Add promote-to-prod script | `promote-to-prod.sh`, `release.sh`, `sync-with-upstream.sh` |
+| `77d5f113` feat(ci): CodeBuild multi-arch images (RHI-5507, #4) | `buildspec-amd64.yml`, `buildspec-arm64.yml`, `.github/workflows/docker.yaml` |
+| `5dc05943` ci: `workflow_dispatch` trigger (RHI-5509, #5) | `.github/workflows/docker.yaml` |
 
 ### This file
 
 | Patch | Files | Probe |
 | -- | -- | -- |
-| `e4494947` docs: the patch register itself (#6) | `PATCH_LIST.md`, `CLAUDE.md` | `test -f PATCH_LIST.md`, and `grep -q "This is a fork" CLAUDE.md` |
+| `6d5bdcea` docs: the patch register itself (#6) | `PATCH_LIST.md`, `CLAUDE.md` | `test -f PATCH_LIST.md`, and `grep -q "This is a fork" CLAUDE.md` |
 
 Listed because it is a fork-only file and can be dropped by a sync like any other patch —
 and losing it loses the ability to detect that anything else was dropped. `CLAUDE.md` is
