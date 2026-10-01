@@ -1,0 +1,250 @@
+---
+title: Bundle submission
+description: Send every eth_sendRawTransaction on a network to Flashbots-style bundle relays instead of the public mempool, so a transaction that would revert never lands and nobody sees it before it is mined.
+---
+
+import { LLMsTxtLink, AISection, ConfigTabs, PromptExample } from "../../../components";
+
+<LLMsTxtLink />
+
+# Bundle submission
+
+On a public mempool, a transaction that reverts still lands and still pays gas, and a
+pending one can be front-run or copied. Bundle submission turns every
+`eth_sendRawTransaction` on a network into signed `eth_sendBundle` requests to relays you
+choose, such as Flashbots, for the next few blocks. Builders only include a bundle whose
+transaction succeeds. Callers keep calling `eth_sendRawTransaction` and still get the
+transaction hash back.
+
+**What you get**
+
+- No path to the public mempool: retries, hedges and failover can't reach the network's ordinary upstreams
+- Reverting transactions don't land, so they cost nothing
+- The builder list, and any other bundle field, is config
+- Requests are signed with `X-Flashbots-Signature`, and the key is redacted wherever config is printed
+- One counter for every outcome
+
+## Quick taste
+
+Illustrative, not a tuned production config. Mainnet writes go to the Flashbots relay:
+
+<ConfigTabs
+  path="projects[].networks[].evm.bundleSubmission"
+  focusYaml="7-11,18-21"
+  focusTs="6-9,16-18"
+  yaml={`projects:
+  - id: main
+    networks:
+      - architecture: evm
+        evm:
+          chainId: 1
+          # every eth_sendRawTransaction becomes bundles for head+1 … head+3
+          bundleSubmission:
+            useUpstream: bundle-relay
+            bundleFields:
+              builders: [flashbots, Titan]
+    upstreams:
+      - id: flashbots-relay
+        endpoint: https://relay.flashbots.net
+        evm: { chainId: 1 }
+        tags: [bundle-relay]
+        # bundle methods only, so the relay never receives a raw broadcast
+        ignoreMethods: ["*"]
+        allowMethods: [eth_sendBundle]
+        jsonRpc:
+          flashbotsSigningKey: \${FLASHBOTS_SIGNING_KEY}`}
+  ts={`projects: [{
+  id: "main",
+  networks: [{
+    architecture: "evm",
+    // every eth_sendRawTransaction becomes bundles for head+1 … head+3
+    evm: { chainId: 1, bundleSubmission: {
+      useUpstream: "bundle-relay",
+      bundleFields: { builders: ["flashbots", "Titan"] },
+    } },
+  }],
+  upstreams: [{
+    id: "flashbots-relay",
+    endpoint: "https://relay.flashbots.net",
+    evm: { chainId: 1 },
+    tags: ["bundle-relay"],
+    // bundle methods only, so the relay never receives a raw broadcast
+    ignoreMethods: ["*"], allowMethods: ["eth_sendBundle"],
+    jsonRpc: { flashbotsSigningKey: process.env.FLASHBOTS_SIGNING_KEY },
+  }],
+}]`}
+/>
+
+## Agent reference
+
+Copy one of these prompts into your AI agent session. Each points the agent at this page so
+it can do the work correctly:
+
+<PromptExample
+	n={1}
+	title="send a network's writes privately"
+	defaultOpen
+	prompt={`Make every eth_sendRawTransaction on Ethereum mainnet in my eRPC config go to the
+Flashbots relay as signed bundles instead of my ordinary upstreams, shared with a builder
+list I choose. Lock the relay upstream to eth_sendBundle and give eth_sendBundle its own
+failsafe entry. Read the bundle submission reference (config/projects/bundle-submission) first.`}
+/>
+
+<PromptExample
+	n={2}
+	title="audit my bundle submission setup"
+	prompt={`Audit the bundle submission setup in my eRPC config. Check that no ordinary
+upstream can receive the network's writes, that useUpstream matches only bundle relays,
+that the signing key comes from the environment, and that targetBlocks fits how often my
+clients re-broadcast. Tell me which metrics show whether bundles are accepted. Use the
+bundle submission reference (config/projects/bundle-submission).`}
+/>
+
+<AISection
+	title="Bundle submission — full agent reference"
+	hint="Everything an agent needs to configure bundle submission: schema, behavior, edge cases, observability, source."
+>
+
+### How it works
+
+A project-level pre-forward hook answers `eth_sendRawTransaction` on any EVM network that
+sets `evm.bundleSubmission`. It runs before the cache and before upstream selection, so the
+transaction never enters the normal path. For each request it:
+
+1. Decodes the signed transaction to get its hash. An undecodable transaction is rejected as
+   an invalid request, and nothing is sent anywhere.
+2. Reads the network head `N`: the highest latest block across the network's upstreams. If
+   no upstream has reported a head yet, it returns a retryable error and sends nothing.
+3. Builds `targetBlocks` bundles, one for each of blocks `N+1` to `N+targetBlocks`. Each
+   bundle is `bundleFields`, copied verbatim, plus `txs: [<raw tx>]` and
+   `blockNumber: <hex>`.
+4. Forwards them concurrently as `eth_sendBundle` sub-requests, pinned to the upstreams
+   matching `useUpstream` (the same selector syntax as the `use-upstream` directive).
+   Sub-requests go through the network as usual, so the network's failsafe entry for
+   `eth_sendBundle`, rate limits, metrics and request signing all apply.
+5. Answers the caller with the transaction hash as soon as one target block is accepted.
+   The remaining submissions keep running after the answer. They are bounded by the
+   `eth_sendBundle` failsafe policy, with a 30s safety cap.
+   - If every target block fails, the caller gets the error for the earliest target block.
+
+Requests to an upstream that sets `jsonRpc.flashbotsSigningKey` carry the header
+`X-Flashbots-Signature: <address>:<signature>`. The signature is the EIP-191
+personal-message signature of the `0x`-prefixed hex of `keccak256(body)`. It is computed
+over the exact bytes sent, which is why request gzip and batching are refused on a signing
+upstream.
+
+### Config schema
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `networks[].evm.bundleSubmission.useUpstream` | string | — (required) | Upstream id or tag that receives the bundles. Must match only bundle relays. |
+| `networks[].evm.bundleSubmission.targetBlocks` | int | `3` | Consecutive blocks per broadcast, starting at head + 1. Must be ≥ 1. |
+| `networks[].evm.bundleSubmission.bundleFields` | map | none | Merged verbatim into every `eth_sendBundle` params object (`builders`, `refundPercent`, …). Setting `txs` or `blockNumber` is a config error. |
+| `upstreams[].jsonRpc.flashbotsSigningKey` | string (secret) | none | 32-byte hex secp256k1 key. Prints as `REDACTED` in the config log, `erpc_config` and config dumps. Requires `enableGzip` and `supportsBatch` to be off. |
+
+`bundleSubmission` is rejected under `networkDefaults.evm`. Networks created on demand copy
+`networkDefaults.evm` wholesale, so a default would route every chain's writes to the
+bundle relays, including chains that have none.
+
+### Worked examples
+
+**Ethereum mainnet, with a dedicated write policy.** `eth_sendBundle` is idempotent for the
+same transaction and block, so a retry is safe. A short timeout keeps failures inside the
+caller's own submit timeout:
+
+```yaml
+networks:
+  - architecture: evm
+    evm:
+      chainId: 1
+      bundleSubmission:
+        useUpstream: bundle-relay
+        targetBlocks: 3
+        bundleFields:
+          builders: [flashbots, Titan, beaverbuild.org]
+    failsafe:
+      - matchMethod: eth_sendBundle
+        timeout: { duration: 4s }
+        retry: { maxAttempts: 2, delay: 300ms }
+      - matchMethod: "*"
+        timeout: { duration: 30s }
+```
+
+**Sepolia, for end-to-end testing.** Use the same shape with
+`endpoint: https://relay-sepolia.flashbots.net`, `evm: { chainId: 11155111 }`, and no
+`builders`.
+
+### Request/response behavior
+
+| Case | Caller gets | Sent |
+|---|---|---|
+| At least one target block accepted | `result: <tx hash>` | All `targetBlocks` bundles |
+| Every target block rejected | The earliest target block's error, normalized like any upstream error | All bundles |
+| Transaction undecodable | Invalid-request error (HTTP 400) | Nothing |
+| Network head unknown | Retryable, exhausted-class error | Nothing |
+| Caller goes away first | The context error | Bundles keep going |
+
+The existing `eth_sendRawTransaction` network post-forward check still applies to
+exhausted-class errors. eRPC looks the hash up through the network, and if the transaction
+is already on-chain it answers success. Only the hash is sent for that lookup, never the
+transaction.
+
+### Best practices
+
+- Lock each relay upstream to bundle methods (`ignoreMethods: ["*"]` plus
+  `allowMethods: [eth_sendBundle]`). Some relays also accept a raw `eth_sendRawTransaction`,
+  with undocumented handling.
+- Give `eth_sendBundle` its own failsafe entry, ahead of the catch-all.
+- Choose `targetBlocks` to cover the gap between your clients' re-broadcasts. A client that
+  re-broadcasts every block needs about 2–3.
+- Use a dedicated signing key that holds no funds, one per environment, loaded from the
+  environment. Flashbots tracks reputation per signing address.
+
+### Edge cases & gotchas
+
+1. **Only `eth_sendRawTransaction` is covered.** Other send methods take the normal path.
+2. **Callers lose mempool semantics.** A held transaction is invisible to ordinary
+   upstreams, so the following no longer behave as they would with a public mempool:
+   - `eth_getTransactionCount(…, "pending")` doesn't count it.
+   - `eth_getTransactionByHash` returns null until it lands.
+   - Relays don't report `nonce too low` or `underpriced` at submission.
+   - A transaction that never lands keeps its nonce, and blocks later nonces from the same
+     sender.
+
+   Clients must take nonces from their own ledger, and must replace a nonce that won't land.
+3. **A relay upstream counts toward the network head and passes health gates.** If the
+   selection policy excludes every ordinary upstream, the write-only relay can be the only
+   survivor. Reads then fail with "method ignored" instead of the policy's outage fallback
+   to the full upstream set (upstream erpc#1125).
+4. **A `use-upstream` directive on the incoming request doesn't override the relay pin.**
+5. **Revert protection is enforced by builders, not by the relay.** After a reorg, a
+   transaction from an included bundle can re-enter the public mempool. Every listed
+   builder sees your transactions.
+6. **Relay errors aren't always standard JSON-RPC.** For example, Flashbots answers an
+   unsigned bundle with `-32600 "signature is required"` and `"id": null`. They are
+   normalized like any upstream error.
+
+### Observability
+
+| Metric | Type | Labels | When it fires |
+|---|---|---|---|
+| `erpc_bundle_submission_total` | counter | project, network, outcome | Once per answered `eth_sendRawTransaction`. Outcome is one of: `accepted`, `rejected`, `invalid_tx`, `head_unknown`, `abandoned`. |
+| `erpc_upstream_request_total{category="eth_sendBundle"}` and the other upstream metrics | counter | standard | Every bundle sub-request, per relay upstream |
+
+### Source code entry points
+
+- `architecture/evm/eth_sendRawTransaction_bundle.go` — `projectPreForward_eth_sendRawTransaction`, `submitRawTransactionAsBundles`
+- `architecture/evm/hooks.go` — the `eth_sendrawtransaction` case in `HandleProjectPreForward`
+- `clients/flashbots_signer.go` — `flashbotsSigner.headerValue`, `configureFlashbotsSigner`, `signRequest`
+- `common/config_bundle_submission.go` — `BundleSubmissionConfig`, `SecretString`, validation
+- `telemetry/bundle_submission_metrics.go` — `erpc_bundle_submission_total`
+- `erpc/bundle_submission_test.go` — end-to-end tests, including "the public upstream never sees the transaction"
+
+### Related pages
+
+- [Upstreams](/config/projects/upstreams) — `ignoreMethods` / `allowMethods`, tags, `jsonRpc` options
+- [Networks](/config/projects/networks) — where `evm.bundleSubmission` lives
+- [Retry](/config/failsafe/retry) and [Timeout](/config/failsafe/timeout) — the `eth_sendBundle` failsafe entry
+- [Selection & scoring](/config/projects/selection-policies) — health gates that also see the relay
+
+</AISection>

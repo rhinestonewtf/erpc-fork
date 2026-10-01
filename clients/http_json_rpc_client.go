@@ -57,6 +57,10 @@ type GenericHttpJsonRpcClient struct {
 
 	// Extractor for architecture-specific error normalization
 	errorExtractor common.JsonRpcErrorExtractor
+
+	// Fork (RHI-7827): signs request bodies; nil unless the upstream sets
+	// jsonRpc.flashbotsSigningKey. See flashbots_signer.go.
+	flashbotsSigner *flashbotsSigner
 }
 
 type batchRequest struct {
@@ -137,6 +141,10 @@ func NewGenericHttpJsonRpcClient(
 		}
 
 		client.proxyPool = proxyPool
+	}
+
+	if err := client.configureFlashbotsSigner(jsonRpcCfg); err != nil {
+		return nil, err
 	}
 
 	go func() {
@@ -831,6 +839,10 @@ func (c *GenericHttpJsonRpcClient) prepareRequest(ctx context.Context, body []by
 	// Add custom headers if provided
 	for k, v := range c.headers {
 		httpReq.Header.Set(k, v)
+	}
+
+	if err := c.signRequest(httpReq, body); err != nil {
+		return nil, err
 	}
 
 	// Inject OpenTelemetry trace context into HTTP headers

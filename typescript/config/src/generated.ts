@@ -929,6 +929,11 @@ export interface JsonRpcUpstreamConfig {
   enableGzip?: boolean;
   headers?: { [key: string]: string};
   proxyPool?: string;
+  /**
+   * FlashbotsSigningKey (fork, RHI-7827) signs every request body with an
+   * X-Flashbots-Signature header. See config_bundle_submission.go.
+   */
+  flashbotsSigningKey?: SecretString;
 }
 /**
  * GrpcUpstreamConfig tunes a gRPC (grpc:// / grpc+bds://) upstream. It is the
@@ -1606,6 +1611,12 @@ export interface EvmNetworkConfig {
    * provider-defined routing. This does not affect eth_query* or gRPC Query.
    */
   safeBlockSource?: string;
+  /**
+   * BundleSubmission (fork, RHI-7827) answers eth_sendRawTransaction by
+   * submitting the tx as eth_sendBundle to dedicated relays instead of
+   * broadcasting it. See config_bundle_submission.go.
+   */
+  bundleSubmission?: BundleSubmissionConfig;
 }
 /**
  * EvmServedTipConfig controls how the network derives the "latest"/"finalized"
@@ -1956,6 +1967,48 @@ export interface RateLimitStoreConfig {
   cacheKeyPrefix?: string;
   nearLimitRatio?: number /* float32 */;
 }
+
+//////////
+// source: config_bundle_submission.go
+
+/**
+ * DefaultBundleSubmissionTargetBlocks is how many consecutive blocks, starting
+ * at the network head + 1, one broadcast is submitted for when the network
+ * config does not say.
+ */
+export const DefaultBundleSubmissionTargetBlocks = 3;
+/**
+ * BundleSubmissionConfig makes an EVM network answer every
+ * eth_sendRawTransaction by sending the transaction as a single-tx
+ * eth_sendBundle to the upstreams matching UseUpstream, once for each of the
+ * next TargetBlocks blocks. The transaction never enters normal upstream
+ * selection, so no retry, hedge or failover can deliver it to a
+ * public-mempool upstream. Callers still receive the transaction hash.
+ */
+export interface BundleSubmissionConfig {
+  /**
+   * UseUpstream selects the bundle relays: an upstream id or tag, with the
+   * same syntax as the use-upstream directive. Required.
+   */
+  useUpstream: string;
+  /**
+   * TargetBlocks is how many consecutive blocks, starting at the network
+   * head + 1, each broadcast is submitted for (one eth_sendBundle per block).
+   */
+  targetBlocks?: number /* int */;
+  /**
+   * BundleFields is merged verbatim into every eth_sendBundle params object,
+   * e.g. `builders`. eRPC owns `txs` and `blockNumber`; setting either is a
+   * config error.
+   */
+  bundleFields?: { [key: string]: any};
+}
+/**
+ * SecretString holds a credential read from config, usually via ${ENV}
+ * expansion. It marshals as "REDACTED", so the value never appears in the
+ * startup config log, the admin erpc_config method or a config dump.
+ */
+export type SecretString = string;
 
 //////////
 // source: config_integrity.go

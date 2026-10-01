@@ -2607,6 +2607,10 @@ func (e *EvmNetworkConfig) SetDefaults() error {
 		e.MarkEmptyAsErrorMethods = DefaultMarkEmptyAsErrorMethods()
 	}
 
+	if e.BundleSubmission != nil {
+		e.BundleSubmission.SetDefaults()
+	}
+
 	return nil
 }
 

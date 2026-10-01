@@ -1257,6 +1257,9 @@ type JsonRpcUpstreamConfig struct {
 	EnableGzip    *bool             `yaml:"enableGzip,omitempty" json:"enableGzip"`
 	Headers       map[string]string `yaml:"headers,omitempty" json:"headers"`
 	ProxyPool     string            `yaml:"proxyPool,omitempty" json:"proxyPool"`
+	// FlashbotsSigningKey (fork, RHI-7827) signs every request body with an
+	// X-Flashbots-Signature header. See config_bundle_submission.go.
+	FlashbotsSigningKey SecretString `yaml:"flashbotsSigningKey,omitempty" json:"flashbotsSigningKey,omitempty"`
 }
 
 func (c *JsonRpcUpstreamConfig) Copy() *JsonRpcUpstreamConfig {
@@ -2568,6 +2571,11 @@ type EvmNetworkConfig struct {
 	// serve `safe`; empty (without an inherited network default) keeps existing
 	// provider-defined routing. This does not affect eth_query* or gRPC Query.
 	SafeBlockSource string `yaml:"safeBlockSource,omitempty" json:"safeBlockSource,omitempty"`
+
+	// BundleSubmission (fork, RHI-7827) answers eth_sendRawTransaction by
+	// submitting the tx as eth_sendBundle to dedicated relays instead of
+	// broadcasting it. See config_bundle_submission.go.
+	BundleSubmission *BundleSubmissionConfig `yaml:"bundleSubmission,omitempty" json:"bundleSubmission,omitempty"`
 
 	// Deprecated: replaced by EmptyResultConfidence (blockHead). Retained as a yaml-only
 	// key so existing configs keep loading; SetDefaults warns and ignores it. The old
