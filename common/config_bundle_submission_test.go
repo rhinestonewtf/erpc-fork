@@ -215,3 +215,41 @@ func TestFlashbotsSigningKey_NeverSerialized(t *testing.T) {
 	assert.Equal(t, "REDACTED", fmt.Sprintf("%v", SecretString(bundleTestSigningKey)))
 	assert.Equal(t, "", fmt.Sprintf("%v", SecretString("")), "an unset secret stays visibly unset")
 }
+
+func TestFlashbotsSigningKey_InheritedFromUpstreamDefaults(t *testing.T) {
+	// upstreamDefaults.jsonRpc is inherited as a whole by an upstream that has no
+	// jsonRpc block of its own, and not at all by one that does. The signing key
+	// must follow the same rule, not be silently dropped.
+	cfg, err := loadBundleTestConfig(t, `
+logLevel: warn
+projects:
+  - id: main
+    upstreamDefaults:
+      jsonRpc:
+        supportsBatch: false
+        flashbotsSigningKey: "`+bundleTestSigningKey+`"
+    networks:
+      - architecture: evm
+        evm:
+          chainId: 1
+    upstreams:
+      - id: inherits
+        endpoint: http://relay.localhost
+        evm:
+          chainId: 1
+      - id: own-block
+        endpoint: http://rpc1.localhost
+        evm:
+          chainId: 1
+        jsonRpc:
+          supportsBatch: false
+`)
+	require.NoError(t, err)
+
+	keys := map[string]SecretString{}
+	for _, u := range cfg.Projects[0].Upstreams {
+		keys[u.Id] = u.JsonRpc.FlashbotsSigningKey
+	}
+	assert.Equal(t, SecretString(bundleTestSigningKey), keys["inherits"])
+	assert.Empty(t, keys["own-block"], "an upstream with its own jsonRpc block inherits none of the defaults' jsonRpc")
+}
