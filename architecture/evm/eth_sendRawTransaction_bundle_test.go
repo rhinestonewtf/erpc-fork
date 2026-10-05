@@ -110,6 +110,19 @@ func (n *bundleTestNetwork) bundleBlocks() []string {
 	return blocks
 }
 
+// inflightCount is how many target blocks of the fixture tx still have a
+// submission running, or -1 if the tx is not kept.
+func (n *bundleTestNetwork) inflightCount() int {
+	k := keepAliveFor(n)
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	kt, ok := k.kept[sendRawTxFixtureHash]
+	if !ok {
+		return -1
+	}
+	return len(kt.inflight)
+}
+
 func (n *bundleTestNetwork) keptCount() int {
 	k := keepAliveFor(n)
 	k.mu.Lock()
@@ -414,7 +427,7 @@ func TestBundleKeepAlive_UnreadableNonceKeepsSubmitting(t *testing.T) {
 	waitForBundles(t, n, 2)
 	assert.Equal(t, 1, n.keptCount(), "a failed read must not settle the transaction")
 	// A re-broadcast with a 1ms window lets the loop wind down.
-	keepAliveFor(n).keep(&sendRawTx{hash: sendRawTxFixtureHash}, 0, time.Millisecond)
+	keepAliveFor(n).keep(&sendRawTx{hash: sendRawTxFixtureHash}, 0, nil, time.Millisecond)
 	require.Eventually(t, func() bool { return n.keptCount() == 0 }, 2*time.Second, 2*time.Millisecond)
 }
 
@@ -441,16 +454,64 @@ func TestBundleKeepAlive_RebroadcastRestartsTheWindow(t *testing.T) {
 	k := keepAliveFor(n)
 	tx := &sendRawTx{raw: sendRawTxFixture, hash: sendRawTxFixtureHash, sender: "0xabc", nonce: 1}
 
-	k.keep(tx, 101, time.Minute)
-	k.keep(tx, 105, time.Hour)
+	k.keep(tx, 101, []int64{102}, time.Minute)
+	k.keep(tx, 103, nil, time.Hour)
 
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	require.Len(t, k.kept, 1, "a re-broadcast is the same kept transaction")
 	kt := k.kept[sendRawTxFixtureHash]
-	assert.Equal(t, int64(105), kt.coveredTo, "coverage only moves forward")
+	assert.Contains(t, kt.accepted, int64(101))
+	assert.Contains(t, kt.accepted, int64(103), "what each broadcast learns is kept")
+	assert.Contains(t, kt.inflight, int64(102))
 	assert.True(t, time.Until(kt.deadline) > 30*time.Minute, "the window restarts from the re-broadcast")
 	kt.deadline = time.Now() // let the loop wind down
+}
+
+func TestBundleKeepAlive_RetriesTargetBlocksThatFailed(t *testing.T) {
+	fastKeepAlive(t)
+	cfg := bundleCfg(3)
+	cfg.ResubmitFor = common.Duration(time.Minute)
+	n := newBundleTestNetwork(100, cfg)
+	var mu sync.Mutex
+	attempts := map[string]int{}
+	n.forwardFn = func(ctx context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
+		block := bundleBlock(req)
+		mu.Lock()
+		attempts[block]++
+		first := attempts[block] == 1
+		mu.Unlock()
+		if first && (block == "0x66" || block == "0x67") {
+			// Rejected after h+1 is accepted, the order the review flagged.
+			time.Sleep(30 * time.Millisecond)
+			return nil, fmt.Errorf("relay rejected block %s", block)
+		}
+		return acceptBundle(ctx, req)
+	}
+
+	// The relay accepts h+1 but rejects h+2 and h+3: the caller is still answered.
+	_, resp, err := HandleProjectPreForward(context.Background(), n, sendRawTxRequest(`"`+sendRawTxFixture+`"`))
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	waitForBundles(t, n, 3)
+	require.Eventually(t, func() bool { return n.inflightCount() == 0 }, 2*time.Second, 2*time.Millisecond,
+		"both rejections are recorded against the kept transaction")
+
+	// The next head retries the rejected blocks along with the newly reachable one.
+	n.latest.Store(101)
+	waitForBundles(t, n, 6)
+	assert.Equal(t, []string{"0x65", "0x66", "0x66", "0x67", "0x67", "0x68"}, n.bundleBlocks(),
+		"a target block whose submission failed must be resubmitted, not assumed covered")
+
+	// Once accepted, the retried blocks are not submitted again.
+	n.latest.Store(102)
+	waitForBundles(t, n, 7)
+	time.Sleep(30 * time.Millisecond)
+	assert.Equal(t, []string{"0x65", "0x66", "0x66", "0x67", "0x67", "0x68", "0x69"}, n.bundleBlocks())
+
+	n.onChainNonce.Store(sendRawTxFixtureNonce + 1)
+	n.latest.Store(103)
+	require.Eventually(t, func() bool { return n.keptCount() == 0 }, 2*time.Second, 2*time.Millisecond)
 }
 
 func TestBundleKeepAlive_StopsWhenBundleSubmissionIsRemoved(t *testing.T) {

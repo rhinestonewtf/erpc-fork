@@ -102,26 +102,39 @@ func submitRawTransactionAsBundles(ctx context.Context, n common.Network, nq *co
 			fmt.Errorf("bundle submission: the network head is not known yet, so there is no block to target"),
 		)
 	}
-	coveredTo := head + int64(cfg.TargetBlocks)
 	span.SetAttributes(attribute.Int64("head", head), attribute.Int("target_blocks", cfg.TargetBlocks))
 
-	results := submitBundles(context.WithoutCancel(ctx), n, nq.ID(), cfg, tx.raw, head+1, coveredTo)
+	targets := make([]int64, 0, cfg.TargetBlocks)
+	for b := head + 1; b <= head+int64(cfg.TargetBlocks); b++ {
+		targets = append(targets, b)
+	}
+	results := submitBundles(context.WithoutCancel(ctx), n, nq.ID(), cfg, tx.raw, targets)
 
 	// The collector deliberately outlives this request: the caller is answered
 	// at the first accepted target block, and an accepted transaction is kept
-	// alive even if the caller has already gone.
+	// alive even if the caller has already gone. Keep-alive learns the outcome
+	// of every target block, so one that fails here is retried there.
 	answer := make(chan error, 1)
 	go func() {
+		ka := keepAliveFor(n)
+		pending := make(map[int64]struct{}, len(targets))
+		for _, b := range targets {
+			pending[b] = struct{}{}
+		}
 		accepted := false
 		var firstErr error
 		var firstErrBlock int64
 		for r := range results {
+			delete(pending, r.block)
+			switch {
+			case r.err == nil && !accepted:
+				accepted = true
+				ka.keep(tx, r.block, keys(pending), cfg.ResubmitFor.Duration())
+				answer <- nil
+			case accepted:
+				ka.recordTarget(tx.hash, r.block, r.err == nil)
+			}
 			if r.err == nil {
-				if !accepted {
-					accepted = true
-					keepAliveFor(n).keep(tx, coveredTo, cfg.ResubmitFor.Duration())
-					answer <- nil
-				}
 				continue
 			}
 			lg.Debug().Err(r.err).Str("txHash", tx.hash).Int64("targetBlock", r.block).Msg("bundle submission for target block failed")
@@ -202,14 +215,14 @@ func decodeSendRawTx(nq *common.NormalizedRequest, n common.Network) (*sendRawTx
 	return &sendRawTx{raw: raw, hash: tx.Hash().Hex(), sender: from.Hex(), nonce: tx.Nonce()}, nil
 }
 
-// submitBundles submits rawTx as one eth_sendBundle per block in [from, to],
-// concurrently, pinned to the configured relays. It returns the results on a
-// channel that is closed once every submission has finished.
-func submitBundles(ctx context.Context, n common.Network, parentID interface{}, cfg *common.BundleSubmissionConfig, rawTx string, from, to int64) <-chan bundleTargetResult {
+// submitBundles submits rawTx as one eth_sendBundle per block, concurrently,
+// pinned to the configured relays. It returns the results on a channel that is
+// closed once every submission has finished.
+func submitBundles(ctx context.Context, n common.Network, parentID interface{}, cfg *common.BundleSubmissionConfig, rawTx string, blocks []int64) <-chan bundleTargetResult {
 	ctx, cancel := context.WithTimeout(ctx, bundleSubmissionDetachedTimeout)
-	results := make(chan bundleTargetResult, to-from+1)
+	results := make(chan bundleTargetResult, len(blocks))
 	var wg sync.WaitGroup
-	for block := from; block <= to; block++ {
+	for _, block := range blocks {
 		params := []interface{}{bundleParams(rawTx, block, cfg.BundleFields)}
 		wg.Add(1)
 		go func(block int64) {
@@ -238,6 +251,14 @@ func bundleParams(rawTx string, block int64, fields map[string]interface{}) map[
 	return p
 }
 
+func keys(m map[int64]struct{}) []int64 {
+	out := make([]int64, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 // bundleKeepAlive keeps a network's accepted transactions submitted for each
 // new block until the sender's nonce passes them or their window ends. A
 // bundle is only valid for the block it targets, so without this a caller that
@@ -254,9 +275,13 @@ type bundleKeepAlive struct {
 }
 
 type keptTx struct {
-	tx        *sendRawTx
-	coveredTo int64     // highest block a bundle has been submitted for
-	deadline  time.Time // no submissions after this
+	tx *sendRawTx
+	// Target blocks a relay accepted a bundle for, and target blocks whose
+	// submission is still running. A future block in neither is due, which
+	// is how a target block whose submission failed gets retried.
+	accepted map[int64]struct{}
+	inflight map[int64]struct{}
+	deadline time.Time // no submissions after this
 }
 
 var bundleKeepAlives sync.Map // common.Network -> *bundleKeepAlive
@@ -269,28 +294,47 @@ func keepAliveFor(n common.Network) *bundleKeepAlive {
 	return v.(*bundleKeepAlive)
 }
 
-// keep starts keeping tx alive for window. A re-broadcast of a kept
-// transaction restarts its window.
-func (k *bundleKeepAlive) keep(tx *sendRawTx, coveredTo int64, window time.Duration) {
+// keep starts keeping tx alive for window, given the target block a relay just
+// accepted and the target blocks whose submission is still running. A
+// re-broadcast of a kept transaction adds to what it knows and restarts its
+// window.
+func (k *bundleKeepAlive) keep(tx *sendRawTx, acceptedBlock int64, inflight []int64, window time.Duration) {
 	deadline := time.Now().Add(window)
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if kt, ok := k.kept[tx.hash]; ok {
-		kt.deadline = deadline
-		if coveredTo > kt.coveredTo {
-			kt.coveredTo = coveredTo
+	kt, ok := k.kept[tx.hash]
+	if !ok {
+		if len(k.kept) >= bundleKeepAliveMaxKept {
+			k.record(telemetry.BundleKeepAliveOutcomeOverflow)
+			return
 		}
+		kt = &keptTx{tx: tx, accepted: make(map[int64]struct{}), inflight: make(map[int64]struct{})}
+		k.kept[tx.hash] = kt
+		k.updateGauge()
+		if !k.running {
+			k.running = true
+			go k.run()
+		}
+	}
+	kt.deadline = deadline
+	kt.accepted[acceptedBlock] = struct{}{}
+	for _, b := range inflight {
+		kt.inflight[b] = struct{}{}
+	}
+}
+
+// recordTarget records how a kept transaction's submission for block ended. A
+// block that was not accepted becomes due again while it is still ahead.
+func (k *bundleKeepAlive) recordTarget(hash string, block int64, accepted bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	kt, ok := k.kept[hash]
+	if !ok {
 		return
 	}
-	if len(k.kept) >= bundleKeepAliveMaxKept {
-		k.record(telemetry.BundleKeepAliveOutcomeOverflow)
-		return
-	}
-	k.kept[tx.hash] = &keptTx{tx: tx, coveredTo: coveredTo, deadline: deadline}
-	k.updateGauge()
-	if !k.running {
-		k.running = true
-		go k.run()
+	delete(kt.inflight, block)
+	if accepted {
+		kt.accepted[block] = struct{}{}
 	}
 }
 
@@ -347,7 +391,9 @@ func (k *bundleKeepAlive) prune(cfg *common.BundleSubmissionConfig, now time.Tim
 }
 
 // step settles transactions whose sender's nonce has moved past them, then
-// submits the rest for the blocks the new head brings into reach.
+// submits the rest for every target block (head+1 … head+targetBlocks) that no
+// relay has accepted and no submission is running for: the block the new head
+// brings into reach, and any earlier one whose submission failed.
 func (k *bundleKeepAlive) step(cfg *common.BundleSubmissionConfig, head int64) {
 	k.mu.Lock()
 	senders := make(map[string]struct{}, len(k.kept))
@@ -358,8 +404,9 @@ func (k *bundleKeepAlive) step(cfg *common.BundleSubmissionConfig, head int64) {
 	nonces := k.latestNonces(senders)
 
 	type resubmission struct {
-		raw      string
-		from, to int64
+		hash   string
+		raw    string
+		blocks []int64
 	}
 	var due []resubmission
 	upTo := head + int64(cfg.TargetBlocks)
@@ -370,29 +417,43 @@ func (k *bundleKeepAlive) step(cfg *common.BundleSubmissionConfig, head int64) {
 			k.record(telemetry.BundleKeepAliveOutcomeSettled)
 			continue
 		}
-		from := kt.coveredTo + 1
-		if from <= head {
-			from = head + 1
+		for b := range kt.accepted {
+			if b <= head {
+				delete(kt.accepted, b)
+			}
 		}
-		if from > upTo {
-			continue
+		for b := range kt.inflight {
+			if b <= head {
+				delete(kt.inflight, b)
+			}
 		}
-		due = append(due, resubmission{raw: kt.tx.raw, from: from, to: upTo})
-		kt.coveredTo = upTo
+		var blocks []int64
+		for b := head + 1; b <= upTo; b++ {
+			_, isAccepted := kt.accepted[b]
+			_, isInflight := kt.inflight[b]
+			if !isAccepted && !isInflight {
+				blocks = append(blocks, b)
+				kt.inflight[b] = struct{}{}
+			}
+		}
+		if len(blocks) > 0 {
+			due = append(due, resubmission{hash: hash, raw: kt.tx.raw, blocks: blocks})
+		}
 	}
 	k.updateGauge()
 	k.mu.Unlock()
 
 	lg := k.network.Logger().With().Str("hook", "bundleSubmission").Logger()
 	for _, r := range due {
-		results := submitBundles(context.Background(), k.network, nil, cfg, r.raw, r.from, r.to)
-		go func() {
+		results := submitBundles(context.Background(), k.network, nil, cfg, r.raw, r.blocks)
+		go func(r resubmission) {
 			for res := range results {
+				k.recordTarget(r.hash, res.block, res.err == nil)
 				if res.err != nil {
-					lg.Debug().Err(res.err).Int64("targetBlock", res.block).Msg("bundle resubmission for target block failed")
+					lg.Debug().Err(res.err).Str("txHash", r.hash).Int64("targetBlock", res.block).Msg("bundle resubmission for target block failed")
 				}
 			}
-		}()
+		}(r)
 	}
 }
 
