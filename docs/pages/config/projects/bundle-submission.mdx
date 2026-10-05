@@ -135,8 +135,11 @@ transaction never enters the normal path. For each request it:
    - It reads the sender's on-chain nonce (`eth_getTransactionCount`, `latest`, one read
      per sender). Once the nonce passes the transaction's nonce, meaning it was included or
      replaced, eRPC stops.
-   - Otherwise it submits the transaction for the block the new head brings into reach,
-     always `targetBlocks` ahead.
+   - Otherwise it submits the transaction for every target block (`head+1` to
+     `head+targetBlocks`) that no relay has accepted yet and no submission is running for.
+     That is normally just the block the new head brings into reach. It also covers any
+     earlier target block whose submission failed, so a partial rejection is retried
+     rather than left uncovered.
 
    This goes on for `resubmitFor` after the most recent broadcast, and a re-broadcast
    restarts the window. When the window runs out with the nonce unmoved, eRPC gives up and
