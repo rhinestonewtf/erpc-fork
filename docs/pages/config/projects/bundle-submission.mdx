@@ -162,7 +162,7 @@ upstream.
 | `networks[].evm.bundleSubmission.targetBlocks` | int | `3` | Consecutive blocks per broadcast, starting at head + 1. Must be ≥ 1. |
 | `networks[].evm.bundleSubmission.resubmitFor` | duration | `5m` | How long after its latest broadcast an accepted transaction keeps being submitted for each new block. Stops early once the sender's nonce passes it. Flashbots Protect keeps transactions for 25 blocks, about 5 minutes on mainnet. |
 | `networks[].evm.bundleSubmission.bundleFields` | map | none | Merged verbatim into every `eth_sendBundle` params object (`builders`, `refundPercent`, …). Setting `txs` or `blockNumber` is a config error. |
-| `upstreams[].jsonRpc.flashbotsSigningKey` | string (secret) | none | 32-byte hex secp256k1 key. Prints as `REDACTED` in the config log, `erpc_config` and config dumps. Requires `enableGzip` and `supportsBatch` to be off. |
+| `upstreams[].jsonRpc.flashbotsSigningKey` | string (secret) | none | 32-byte hex secp256k1 key. Prints as `REDACTED` in the config log, `erpc_config` and config dumps. Requires `enableGzip` and `supportsBatch` to be off. Inherited from `upstreamDefaults.jsonRpc` with the rest of that block, by any upstream that has no `jsonRpc` block of its own. Set it on the relay upstreams, though: from defaults it signs requests to every upstream that inherits it. |
 
 `bundleSubmission` is rejected under `networkDefaults.evm`. Networks created on demand copy
 `networkDefaults.evm` wholesale, so a default would route every chain's writes to the
