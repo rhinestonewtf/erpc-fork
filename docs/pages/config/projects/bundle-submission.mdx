@@ -12,14 +12,16 @@ import { LLMsTxtLink, AISection, ConfigTabs, PromptExample } from "../../../comp
 On a public mempool, a transaction that reverts still lands and still pays gas, and a
 pending one can be front-run or copied. Bundle submission turns every
 `eth_sendRawTransaction` on a network into signed `eth_sendBundle` requests to relays you
-choose, such as Flashbots, for the next few blocks. Builders only include a bundle whose
-transaction succeeds. Callers keep calling `eth_sendRawTransaction` and still get the
-transaction hash back.
+choose, such as Flashbots, for the next few blocks, and keeps the transaction submitted
+block after block until it lands. Builders only include a bundle whose transaction
+succeeds. Callers keep calling `eth_sendRawTransaction` and still get the transaction hash
+back.
 
 **What you get**
 
 - No path to the public mempool: retries, hedges and failover can't reach the network's ordinary upstreams
 - Reverting transactions don't land, so they cost nothing
+- Mempool-like retention: an accepted transaction stays submitted until it is included, even for clients that send once
 - The builder list, and any other bundle field, is config
 - Requests are signed with `X-Flashbots-Signature`, and the key is redacted wherever config is printed
 - One counter for every outcome
@@ -111,8 +113,9 @@ A project-level pre-forward hook answers `eth_sendRawTransaction` on any EVM net
 sets `evm.bundleSubmission`. It runs before the cache and before upstream selection, so the
 transaction never enters the normal path. For each request it:
 
-1. Decodes the signed transaction to get its hash. An undecodable transaction is rejected as
-   an invalid request, and nothing is sent anywhere.
+1. Decodes the signed transaction to get its hash, sender and nonce. A transaction is
+   rejected as an invalid request, and nothing is sent anywhere, if it can't be decoded,
+   has no recoverable sender, or is signed for another chain.
 2. Reads the network head `N`: the highest latest block across the network's upstreams. If
    no upstream has reported a head yet, it returns a retryable error and sends nothing.
 3. Builds `targetBlocks` bundles, one for each of blocks `N+1` to `N+targetBlocks`. Each
@@ -126,6 +129,21 @@ transaction never enters the normal path. For each request it:
    The remaining submissions keep running after the answer. They are bounded by the
    `eth_sendBundle` failsafe policy, with a 30s safety cap.
    - If every target block fails, the caller gets the error for the earliest target block.
+6. **Keeps an accepted transaction alive.** A bundle is only valid for the block it
+   targets, so eRPC stays responsible for the transaction after answering. On each new
+   network head it does two things:
+   - It reads the sender's on-chain nonce (`eth_getTransactionCount`, `latest`, one read
+     per sender). Once the nonce passes the transaction's nonce, meaning it was included or
+     replaced, eRPC stops.
+   - Otherwise it submits the transaction for the block the new head brings into reach,
+     always `targetBlocks` ahead.
+
+   This goes on for `resubmitFor` after the most recent broadcast, and a re-broadcast
+   restarts the window. When the window runs out with the nonce unmoved, eRPC gives up and
+   counts the transaction as `expired`, so a drop is never silent.
+
+   Kept transactions live in memory, one set per network per process, capped at 10,000. A
+   restart forgets them, as a node restart forgets its mempool.
 
 Requests to an upstream that sets `jsonRpc.flashbotsSigningKey` carry the header
 `X-Flashbots-Signature: <address>:<signature>`. The signature is the EIP-191
@@ -139,6 +157,7 @@ upstream.
 |---|---|---|---|
 | `networks[].evm.bundleSubmission.useUpstream` | string | — (required) | Upstream id or tag that receives the bundles. Must match only bundle relays. |
 | `networks[].evm.bundleSubmission.targetBlocks` | int | `3` | Consecutive blocks per broadcast, starting at head + 1. Must be ≥ 1. |
+| `networks[].evm.bundleSubmission.resubmitFor` | duration | `5m` | How long after its latest broadcast an accepted transaction keeps being submitted for each new block. Stops early once the sender's nonce passes it. Flashbots Protect keeps transactions for 25 blocks, about 5 minutes on mainnet. |
 | `networks[].evm.bundleSubmission.bundleFields` | map | none | Merged verbatim into every `eth_sendBundle` params object (`builders`, `refundPercent`, …). Setting `txs` or `blockNumber` is a config error. |
 | `upstreams[].jsonRpc.flashbotsSigningKey` | string (secret) | none | 32-byte hex secp256k1 key. Prints as `REDACTED` in the config log, `erpc_config` and config dumps. Requires `enableGzip` and `supportsBatch` to be off. |
 
@@ -180,7 +199,7 @@ networks:
 |---|---|---|
 | At least one target block accepted | `result: <tx hash>` | All `targetBlocks` bundles |
 | Every target block rejected | The earliest target block's error, normalized like any upstream error | All bundles |
-| Transaction undecodable | Invalid-request error (HTTP 400) | Nothing |
+| Transaction undecodable, without a valid sender, or signed for another chain | Invalid-request error (HTTP 400) | Nothing |
 | Network head unknown | Retryable, exhausted-class error | Nothing |
 | Caller goes away first | The context error | Bundles keep going |
 
@@ -195,21 +214,24 @@ transaction.
   `allowMethods: [eth_sendBundle]`). Some relays also accept a raw `eth_sendRawTransaction`,
   with undocumented handling.
 - Give `eth_sendBundle` its own failsafe entry, ahead of the catch-all.
-- Choose `targetBlocks` to cover the gap between your clients' re-broadcasts. A client that
-  re-broadcasts every block needs about 2–3.
+- Keep `targetBlocks` small (2–3). Keep-alive already covers later blocks, and a large value
+  only multiplies the requests each broadcast makes.
+- Set `resubmitFor` to how long a transaction should wait for inclusion before being
+  dropped. Alert on `erpc_bundle_keepalive_total{outcome="expired"}`.
 - Use a dedicated signing key that holds no funds, one per environment, loaded from the
   environment. Flashbots tracks reputation per signing address.
 
 ### Edge cases & gotchas
 
 1. **Only `eth_sendRawTransaction` is covered.** Other send methods take the normal path.
-2. **Callers lose mempool semantics.** A held transaction is invisible to ordinary
+2. **Callers lose some mempool semantics.** A held transaction is invisible to ordinary
    upstreams, so the following no longer behave as they would with a public mempool:
    - `eth_getTransactionCount(…, "pending")` doesn't count it.
    - `eth_getTransactionByHash` returns null until it lands.
    - Relays don't report `nonce too low` or `underpriced` at submission.
-   - A transaction that never lands keeps its nonce, and blocks later nonces from the same
-     sender.
+   - A transaction that never lands (for example one that keeps reverting) is dropped when
+     `resubmitFor` runs out, but its nonce stays unused, so later nonces from the same
+     sender stay blocked.
 
    Clients must take nonces from their own ledger, and must replace a nonce that won't land.
 3. **A relay upstream counts toward the network head and passes health gates.** If the
@@ -223,21 +245,26 @@ transaction.
 6. **Relay errors aren't always standard JSON-RPC.** For example, Flashbots answers an
    unsigned bundle with `-32600 "signature is required"` and `"id": null`. They are
    normalized like any upstream error.
+7. **Keep-alive is per process.** A client's re-broadcast may reach another rpc-proxy
+   replica, which then keeps the transaction too. The resubmissions duplicate each other
+   harmlessly: the same transaction for the same block.
 
 ### Observability
 
 | Metric | Type | Labels | When it fires |
 |---|---|---|---|
 | `erpc_bundle_submission_total` | counter | project, network, outcome | Once per answered `eth_sendRawTransaction`. Outcome is one of: `accepted`, `rejected`, `invalid_tx`, `head_unknown`, `abandoned`. |
+| `erpc_bundle_keepalive_total` | counter | project, network, outcome | Once per kept transaction when keep-alive stops. Outcome is one of: `settled` (nonce passed: included or replaced), `expired` (window ran out with the nonce unmoved: **dropped**), `overflow` (not kept, cap reached), `disabled` (bundleSubmission removed). |
+| `erpc_bundle_keepalive_tracked` | gauge | project, network | Transactions currently kept alive |
 | `erpc_upstream_request_total{category="eth_sendBundle"}` and the other upstream metrics | counter | standard | Every bundle sub-request, per relay upstream |
 
 ### Source code entry points
 
-- `architecture/evm/eth_sendRawTransaction_bundle.go` — `projectPreForward_eth_sendRawTransaction`, `submitRawTransactionAsBundles`
+- `architecture/evm/eth_sendRawTransaction_bundle.go` — `projectPreForward_eth_sendRawTransaction`, `submitRawTransactionAsBundles`, `bundleKeepAlive` (`keep`, `step`, `prune`)
 - `architecture/evm/hooks.go` — the `eth_sendrawtransaction` case in `HandleProjectPreForward`
 - `clients/flashbots_signer.go` — `flashbotsSigner.headerValue`, `configureFlashbotsSigner`, `signRequest`
 - `common/config_bundle_submission.go` — `BundleSubmissionConfig`, `SecretString`, validation
-- `telemetry/bundle_submission_metrics.go` — `erpc_bundle_submission_total`
+- `telemetry/bundle_submission_metrics.go` — `erpc_bundle_submission_total`, `erpc_bundle_keepalive_total`, `erpc_bundle_keepalive_tracked`
 - `erpc/bundle_submission_test.go` — end-to-end tests, including "the public upstream never sees the transaction"
 
 ### Related pages

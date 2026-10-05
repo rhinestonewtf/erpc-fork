@@ -1978,12 +1978,22 @@ export interface RateLimitStoreConfig {
  */
 export const DefaultBundleSubmissionTargetBlocks = 3;
 /**
+ * DefaultBundleSubmissionResubmitFor is how long eRPC keeps an accepted
+ * transaction alive when the network config does not say. Flashbots Protect
+ * keeps transactions for 25 blocks, about five minutes on mainnet.
+ */
+export const DefaultBundleSubmissionResubmitFor: Duration = "5m";
+/**
  * BundleSubmissionConfig makes an EVM network answer every
  * eth_sendRawTransaction by sending the transaction as a single-tx
  * eth_sendBundle to the upstreams matching UseUpstream, once for each of the
  * next TargetBlocks blocks. The transaction never enters normal upstream
  * selection, so no retry, hedge or failover can deliver it to a
  * public-mempool upstream. Callers still receive the transaction hash.
+ * A bundle is only valid for the block it targets, so once a broadcast is
+ * accepted eRPC keeps submitting the transaction for each new block until the
+ * sender's nonce moves past it, or ResubmitFor runs out. Callers that send once
+ * and wait for a receipt therefore get mempool-like retention.
  */
 export interface BundleSubmissionConfig {
   /**
@@ -1996,6 +2006,13 @@ export interface BundleSubmissionConfig {
    * head + 1, each broadcast is submitted for (one eth_sendBundle per block).
    */
   targetBlocks?: number /* int */;
+  /**
+   * ResubmitFor is how long after its latest broadcast an accepted
+   * transaction keeps being submitted for each new block. Submission stops
+   * early once the sender's on-chain nonce passes the transaction's nonce
+   * (included, or replaced). A re-broadcast restarts the window.
+   */
+  resubmitFor?: Duration;
   /**
    * BundleFields is merged verbatim into every eth_sendBundle params object,
    * e.g. `builders`. eRPC owns `txs` and `blockNumber`; setting either is a
