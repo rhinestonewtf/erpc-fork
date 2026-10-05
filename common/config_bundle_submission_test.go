@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
@@ -78,6 +79,7 @@ func TestBundleSubmissionConfig_LoadsFromYaml(t *testing.T) {
 	require.NotNil(t, bs)
 	assert.Equal(t, "bundle-relay", bs.UseUpstream)
 	assert.Equal(t, DefaultBundleSubmissionTargetBlocks, bs.TargetBlocks, "targetBlocks defaults to 3")
+	assert.Equal(t, DefaultBundleSubmissionResubmitFor, bs.ResubmitFor, "resubmitFor defaults to 5m")
 	assert.Equal(t, []interface{}{"flashbots", "Titan"}, bs.BundleFields["builders"])
 
 	var key SecretString
@@ -111,6 +113,7 @@ func TestBundleSubmissionConfig_Validate(t *testing.T) {
 		"valid":                {mutate: func(c *BundleSubmissionConfig) {}},
 		"missing useUpstream":  {mutate: func(c *BundleSubmissionConfig) { c.UseUpstream = " " }, wantErr: "useUpstream is required"},
 		"targetBlocks below 1": {mutate: func(c *BundleSubmissionConfig) { c.TargetBlocks = -1 }, wantErr: "targetBlocks must be at least 1"},
+		"negative resubmitFor": {mutate: func(c *BundleSubmissionConfig) { c.ResubmitFor = -1 }, wantErr: "resubmitFor must not be negative"},
 		"bundleFields sets txs": {
 			mutate:  func(c *BundleSubmissionConfig) { c.BundleFields = map[string]interface{}{"txs": []string{"0x01"}} },
 			wantErr: `must not set "txs"`,
@@ -140,10 +143,22 @@ func TestBundleSubmissionConfig_Validate(t *testing.T) {
 	}
 }
 
-func TestBundleSubmissionConfig_SetDefaultsKeepsExplicitTargetBlocks(t *testing.T) {
-	c := &BundleSubmissionConfig{UseUpstream: "r", TargetBlocks: 5}
+func TestBundleSubmissionConfig_SetDefaultsKeepsExplicitValues(t *testing.T) {
+	c := &BundleSubmissionConfig{UseUpstream: "r", TargetBlocks: 5, ResubmitFor: Duration(time.Minute)}
 	c.SetDefaults()
 	assert.Equal(t, 5, c.TargetBlocks)
+	assert.Equal(t, Duration(time.Minute), c.ResubmitFor)
+}
+
+func TestBundleSubmissionConfig_ResubmitForFromYaml(t *testing.T) {
+	block := bundleSubmissionBlock + "\n            resubmitFor: 2m"
+	cfg, err := loadBundleTestConfig(t, bundleSubmissionYaml(block, "", signingJsonRpc))
+	require.NoError(t, err)
+	for _, n := range cfg.Projects[0].Networks {
+		if n.Evm != nil && n.Evm.ChainId == 1 {
+			assert.Equal(t, Duration(2*time.Minute), n.Evm.BundleSubmission.ResubmitFor)
+		}
+	}
 }
 
 func TestFlashbotsSigningKey_ValidationRefusesUnsignableTransports(t *testing.T) {
