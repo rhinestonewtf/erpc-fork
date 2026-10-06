@@ -9,6 +9,7 @@ package common
 import (
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -50,14 +51,27 @@ type BundleSubmissionConfig struct {
 	ResubmitFor Duration `yaml:"resubmitFor,omitempty" json:"resubmitFor" tstype:"Duration"`
 
 	// BundleFields is merged verbatim into every eth_sendBundle params object,
-	// e.g. `builders`. eRPC owns `txs` and `blockNumber`; setting either is a
-	// config error.
+	// e.g. `builders` or the refund settings. Fields with a per-transaction
+	// meaning are a config error: txs and blockNumber (eRPC fills them),
+	// revertingTxHashes, droppingTxHashes, replacementUuid, minTimestamp and
+	// maxTimestamp.
 	BundleFields map[string]interface{} `yaml:"bundleFields,omitempty" json:"bundleFields,omitempty"`
 }
 
-// bundleSubmissionOwnedFields are the eth_sendBundle params eRPC fills for
-// every submission, so config may not set them.
-var bundleSubmissionOwnedFields = []string{"txs", "blockNumber"}
+// bundleFieldsNotConfigurable are the eth_sendBundle params that bundleFields
+// may not set, with the reason. eRPC fills txs and blockNumber for every
+// submission. The rest are per-transaction, and bundleFields applies one
+// static value to every bundle, which for them is never right. Every other
+// field passes through verbatim, so a new relay setting stays a config change.
+var bundleFieldsNotConfigurable = map[string]string{
+	"txs":               "eRPC fills it for every submission",
+	"blockNumber":       "eRPC fills it for every submission",
+	"revertingTxHashes": "it would let reverting transactions land, which bundle submission exists to prevent",
+	"droppingTxHashes":  "it names specific transactions, so one value cannot apply to every submission",
+	"replacementUuid":   "one value shared by every submission would make each bundle replace the previous one",
+	"minTimestamp":      "one fixed timestamp would apply to every submission, now and later",
+	"maxTimestamp":      "one fixed timestamp would expire every later submission",
+}
 
 func (c *BundleSubmissionConfig) SetDefaults() {
 	if c.TargetBlocks == 0 {
@@ -81,9 +95,14 @@ func (c *BundleSubmissionConfig) Validate() error {
 	if c.ResubmitFor < 0 {
 		return fmt.Errorf("network.*.evm.bundleSubmission.resubmitFor must not be negative, got %s", c.ResubmitFor.Duration())
 	}
-	for _, owned := range bundleSubmissionOwnedFields {
-		if _, ok := c.BundleFields[owned]; ok {
-			return fmt.Errorf("network.*.evm.bundleSubmission.bundleFields must not set %q: eRPC fills it for every submission", owned)
+	fields := make([]string, 0, len(c.BundleFields))
+	for f := range c.BundleFields {
+		fields = append(fields, f)
+	}
+	sort.Strings(fields)
+	for _, f := range fields {
+		if reason, ok := bundleFieldsNotConfigurable[f]; ok {
+			return fmt.Errorf("network.*.evm.bundleSubmission.bundleFields must not set %q: %s", f, reason)
 		}
 	}
 	return nil
