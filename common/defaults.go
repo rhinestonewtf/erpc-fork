@@ -1836,6 +1836,8 @@ func (u *UpstreamConfig) ApplyDefaults(defaults *UpstreamConfig) error {
 			EnableGzip:    defaults.JsonRpc.EnableGzip,
 			ProxyPool:     defaults.JsonRpc.ProxyPool,
 			Headers:       defaults.JsonRpc.Headers,
+			// Fork (RHI-7827): inherited with the rest of the jsonRpc block.
+			FlashbotsSigningKey: defaults.JsonRpc.FlashbotsSigningKey,
 		}
 	}
 	if u.Grpc == nil && defaults.Grpc != nil {
@@ -2605,6 +2607,10 @@ func (e *EvmNetworkConfig) SetDefaults() error {
 	// Default methods for marking empty results as errors
 	if e.MarkEmptyAsErrorMethods == nil {
 		e.MarkEmptyAsErrorMethods = DefaultMarkEmptyAsErrorMethods()
+	}
+
+	if e.BundleSubmission != nil {
+		e.BundleSubmission.SetDefaults()
 	}
 
 	return nil

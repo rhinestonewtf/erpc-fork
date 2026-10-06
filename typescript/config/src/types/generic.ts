@@ -144,9 +144,11 @@ import type {
     );
   
   /**
-    * Network defaults override (chainId isn't needed for defaults config)
+    * Network defaults override (chainId isn't needed for defaults config).
+    * bundleSubmission is per-network only: networks created on demand copy
+    * networkDefaults.evm, so validation rejects it there.
     */
-  export type EvmNetworkConfigForDefaults = Omit<EvmNetworkConfig, "chainId">;
+  export type EvmNetworkConfigForDefaults = Omit<EvmNetworkConfig, "chainId" | "bundleSubmission">;
 
   /**
    * Network defaults override (cluster isn't needed for defaults config)
