@@ -2015,8 +2015,10 @@ export interface BundleSubmissionConfig {
   resubmitFor?: Duration;
   /**
    * BundleFields is merged verbatim into every eth_sendBundle params object,
-   * e.g. `builders`. eRPC owns `txs` and `blockNumber`; setting either is a
-   * config error.
+   * e.g. `builders` or the refund settings. Fields with a per-transaction
+   * meaning are a config error: txs and blockNumber (eRPC fills them),
+   * revertingTxHashes, droppingTxHashes, replacementUuid, minTimestamp and
+   * maxTimestamp.
    */
   bundleFields?: { [key: string]: any};
 }

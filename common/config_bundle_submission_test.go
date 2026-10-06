@@ -122,9 +122,45 @@ func TestBundleSubmissionConfig_Validate(t *testing.T) {
 			mutate:  func(c *BundleSubmissionConfig) { c.BundleFields = map[string]interface{}{"blockNumber": "0x1"} },
 			wantErr: `must not set "blockNumber"`,
 		},
-		"other bundleFields pass": {
+		"bundleFields sets revertingTxHashes": {
 			mutate: func(c *BundleSubmissionConfig) {
-				c.BundleFields = map[string]interface{}{"builders": []string{"flashbots"}, "refundPercent": 10}
+				c.BundleFields = map[string]interface{}{"revertingTxHashes": []string{"0x01"}}
+			},
+			wantErr: `must not set "revertingTxHashes": it would let reverting transactions land`,
+		},
+		"bundleFields sets droppingTxHashes": {
+			mutate: func(c *BundleSubmissionConfig) {
+				c.BundleFields = map[string]interface{}{"droppingTxHashes": []string{"0x01"}}
+			},
+			wantErr: `must not set "droppingTxHashes"`,
+		},
+		"bundleFields sets replacementUuid": {
+			mutate: func(c *BundleSubmissionConfig) {
+				c.BundleFields = map[string]interface{}{"replacementUuid": "0b6a2f40-0000-4000-8000-000000000000"}
+			},
+			wantErr: `must not set "replacementUuid": one value shared by every submission`,
+		},
+		"bundleFields sets minTimestamp": {
+			mutate:  func(c *BundleSubmissionConfig) { c.BundleFields = map[string]interface{}{"minTimestamp": 1} },
+			wantErr: `must not set "minTimestamp"`,
+		},
+		"bundleFields sets maxTimestamp": {
+			mutate:  func(c *BundleSubmissionConfig) { c.BundleFields = map[string]interface{}{"maxTimestamp": 1} },
+			wantErr: `must not set "maxTimestamp"`,
+		},
+		"unknown bundleFields pass through": {
+			mutate: func(c *BundleSubmissionConfig) {
+				c.BundleFields = map[string]interface{}{"someFutureRelayField": true}
+			},
+		},
+		"policy bundleFields pass": {
+			mutate: func(c *BundleSubmissionConfig) {
+				c.BundleFields = map[string]interface{}{
+					"builders":        []string{"flashbots"},
+					"refundPercent":   10,
+					"refundIndex":     0,
+					"refundRecipient": "0x000000000000000000000000000000000000dEaD",
+				}
 			},
 		},
 	}
