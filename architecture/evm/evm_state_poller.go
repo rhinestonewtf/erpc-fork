@@ -305,7 +305,7 @@ func (e *EvmStatePoller) Poll(ctx context.Context) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, err := e.PollFinalizedBlockNumber(ctx)
+		_, err := e.pollFinalizedBlockNumberScheduled(ctx)
 		if err != nil {
 			e.logger.Debug().Err(err).Msg("failed to get finalized block number in evm state poller")
 			ermu.Lock()
@@ -742,7 +742,9 @@ func absInt64(v int64) int64 {
 	return v
 }
 
-func (e *EvmStatePoller) PollFinalizedBlockNumber(ctx context.Context) (int64, error) {
+// pollFinalizedBlockNumber is reached through two wrappers that differ only in how
+// long a cached answer stays usable; see evm_state_poller_finalized_debounce.go.
+func (e *EvmStatePoller) pollFinalizedBlockNumber(ctx context.Context, resolveDbi func(*common.EvmNetworkConfig) time.Duration) (int64, error) {
 	if e.shouldSkipFinalizedCheck() {
 		return 0, nil
 	}
@@ -759,7 +761,7 @@ func (e *EvmStatePoller) PollFinalizedBlockNumber(ctx context.Context) (int64, e
 	networkLabel := e.networkLabel
 	e.stateMu.RUnlock()
 
-	dbi := e.resolveDebounce(cfg)
+	dbi := resolveDbi(cfg)
 
 	return e.finalizedBlockShared.TryUpdateIfStale(ctx, dbi, func(ctx context.Context) (int64, error) {
 		e.logger.Trace().Msg("fetching finalized block number for evm state poller")
