@@ -1394,13 +1394,15 @@ func (t *Tracker) corroboratedNetworkHead(ntwMeta *NetworkMetadata, net string, 
 	if pick.Inputs == 0 {
 		return 0, nil
 	}
-	corroborated := pick.Sorted[common.CorroboratedHeadIndex(pick.Sorted)]
+	// Fork RHI-8079: the head may be capped, so the returned reporter is the
+	// block-time sample source, not necessarily a holder of the head value.
+	head, sampleIdx := common.CorroboratedHead(pick.Sorted)
 	for _, r := range ntwMeta.reporters {
-		if r.Id() == corroborated.UpstreamID {
-			return corroborated.BlockNumber, r
+		if r.Id() == pick.Sorted[sampleIdx].UpstreamID {
+			return head, r
 		}
 	}
-	return corroborated.BlockNumber, nil
+	return head, nil
 }
 
 func (t *Tracker) SetLatestBlockNumber(upstream common.Upstream, blockNumber int64, blockTimestamp int64) {
@@ -1467,14 +1469,17 @@ func (t *Tracker) SetLatestBlockNumber(upstream common.Upstream, blockNumber int
 	// The network timestamp and block-time EMA follow the corroborated head,
 	// whichever upstream reported it.
 	if ntwBn > oldNtwVal && headReporter != nil {
-		headTs := t.getMetadata(metadataKey{headReporter, net}).evmLatestBlockTimestamp.Load()
+		reporterMeta := t.getMetadata(metadataKey{headReporter, net})
+		headTs := reporterMeta.evmLatestBlockTimestamp.Load()
 		if headTs > 0 {
 			// Uses on-chain timestamps (not local clock) so the EMA tracks actual
 			// chain production rate, not our polling cadence. For fast chains where
 			// consecutive blocks share the same integer-second timestamp, samples
 			// are skipped until the timestamp advances; blockGap normalization
 			// recovers sub-second precision.
-			t.updateBlockTimeSample(ntwMeta, netLabel, ntwBn, headTs)
+			// Fork RHI-8079: sample the reporter's own block, which its timestamp
+			// belongs to — the network head may be capped below it.
+			t.updateBlockTimeSample(ntwMeta, netLabel, reporterMeta.evmLatestBlockNumber.Load(), headTs)
 
 			ntwMeta.evmLatestBlockTimestamp.Store(headTs)
 
