@@ -43,6 +43,8 @@ grep -q 'strconv.ParseUint(s, 10, 64)' common/utils.go && echo OK
 grep -q '"wss://"' common/defaults.go && echo OK
 grep -q "pnpm@" Dockerfile && echo OK
 grep -q "resolveRateLimiterRedisTarget" upstream/ratelimiter_registry.go && echo OK
+grep -q "CorroboratedHeadIndex" health/tracker.go && echo OK
+grep -q "CorroboratedHeadIndex" erpc/networks.go && echo OK
 test -f erpc-prod.yaml && echo OK
 test -f buildspec-amd64.yml && echo OK
 test -f buildspec-arm64.yml && echo OK
@@ -71,6 +73,7 @@ around it.
 | `9d91a08d` (part of "update prod config") treat `ws://`/`wss://` endpoints as providers | `common/defaults.go` | `"wss://"` in `common/defaults.go` |
 | `174471cd` fix(docker): pin pnpm to the packageManager version (#7) | `Dockerfile` | `pnpm@` in `Dockerfile` (i.e. a version, not bare `pnpm`) |
 | `38089810` fix(ratelimiter): parse rediss:// URI for the Redis store (RHI-6529, #9) | `upstream/ratelimiter_redis_target.go`, `upstream/ratelimiter_redis_target_test.go`, `upstream/ratelimiter_registry.go` | `resolveRateLimiterRedisTarget` called in `ratelimiter_registry.go` |
+| `5e597c39` fix(health): serve the fresher head when upstreams differ only by lag noise (RHI-8079, #12) | `common/head_noise_tolerance.go` (+ `_test`), call sites in `health/tracker.go` and `erpc/networks.go`; new tests in `health/`, `erpc/`, `internal/policy/`; updated expectations in `health/tracker_*_test.go`, `erpc/networks_served_tip_test.go`, `erpc/networks_selection_policy_realpoll_test.go`; `docs/pages/reference/evm/block-tracking.mdx` | `CorroboratedHeadIndex` called in both `health/tracker.go` and `erpc/networks.go` |
 
 **RHI-6277 — gas-limit rejections are terminal.** A rejection of the transaction's gas
 limit is classified `ErrEndpointExecutionException` and **not** marked retryable toward
@@ -128,6 +131,31 @@ into envoy's dialer flag plus a `tls.Config` that honours the `tls` block when p
 travel in the URL and envoy's argument would override them. The miniredis-over-TLS test
 (`TestRateLimitersRegistry_RedissURI_SharedCounter`) fails on the unpatched call site, so
 a dropped patch shows up as a test failure, not a silent fail-open.
+
+**RHI-8079 — the corroborated head serves the leader within lag noise.** Upstream 0.3.0
+(#1154) made the network head the plain second-highest upstream head, so one wrong-chain
+upstream cannot make every honest one read as far behind. With two upstreams — nearly
+every network in our prod config — that is always the *lower* head: `latest` is
+interpolated to the lagging upstream while `eth_blockNumber` reports the fresher one, so
+a client that waits for block N and reads `latest` gets N-1 for up to a poll cycle. On
+2026-10-06 that made the orchestrator size four Ethereum deposits from their pre-deposit
+balance, and they bridged dust. `CorroboratedHeadIndex` serves the highest head when it
+leads the next by at most `CorroboratedHeadLeadTolerance` (16, the default policy's
+`blockNumberLagAbove`), else the second-highest. It drives both the tracker head (lag) and
+the default `latest`/`finalized` interpolation; majority (`servedTip`) mode is untouched.
+SVM feeds the same tracker, so its slot head follows the same rule.
+
+*Upstreamable:* worth proposing, but upstream chose "N=2 → the lower head" deliberately
+(see the `PickServedTip` doc comment), so expect a discussion rather than a quick merge.
+If it lands upstream, delete this patch.
+
+*Rebase risk:* low for the logic (its own file, two one-line call sites). The likely
+conflicts are the upstream test expectations we changed for 1–5 block gaps — keep ours.
+`TestCorroboratedHeadLeadTolerance_MatchesDefaultPolicyLagThreshold` fails if upstream
+moves the default policy's lag threshold, and the new `*_head_noise_tolerance_test.go`
+files fail if either call site is dropped. Fast chains whose slowest head poller refreshes
+less often than every ~16 blocks fall back to upstream behaviour; that is a poller-config
+question, not this patch.
 
 **Base-10 quantity tolerance.** Some upstreams return EVM quantities as base-10 strings
 instead of `0x`-prefixed hex, which broke upstream health tracking. `HexToUint64` /
