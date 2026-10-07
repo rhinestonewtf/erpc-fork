@@ -834,6 +834,9 @@ func (n *Network) evmHeadReference(ctx context.Context, useFinalized bool) serve
 		ref.Corroborated = pick.Freshest
 		ref.Max = pick.Max
 	}
+	if pick.Inputs > 0 {
+		ref.Corroborated, _ = common.CorroboratedHead(pick.Sorted)
+	}
 	return ref
 }
 
