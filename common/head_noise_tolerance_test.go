@@ -26,8 +26,8 @@ func TestCorroboratedHeadIndex(t *testing.T) {
 		{"sole reporter", headBallot(100), 0},
 		{"two honest upstreams a block apart take the fresher", headBallot(100, 99), 0},
 		{"equal heads", headBallot(100, 100), 0},
-		{"gap at the tolerance is still noise", headBallot(DefaultToleratedBlockHeadRollback+1, 1), 0},
-		{"gap past the tolerance is an outlier", headBallot(DefaultToleratedBlockHeadRollback+2, 1), 1},
+		{"gap at the tolerance is still noise", headBallot(CorroboratedHeadLeadTolerance+1, 1), 0},
+		{"gap past the tolerance is an outlier", headBallot(CorroboratedHeadLeadTolerance+2, 1), 1},
 		{"wrong-chain head over two honest ones", headBallot(62_381_379, 32_610_710, 32_610_710), 1},
 		{"honest leader over a stale third", headBallot(1000, 999, 100), 0},
 	}

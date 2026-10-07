@@ -11689,11 +11689,10 @@ func TestNetwork_HighestLatestBlockNumber(t *testing.T) {
 		unclampedUpstream.EvmStatePoller().SuggestLatestBlock(1950)
 		time.Sleep(50 * time.Millisecond)
 
-		// Fork RHI-8079: effective {1900, 1950} are within noise, so the head is
-		// 1950; the raw values {2000, 1950} would yield 2000.
+		// Second-highest of effective blocks {1900, 1950} = 1900
 		highest := common.EvmHighestLatestBlockNumber(network, ctx)
 
-		assert.Equal(t, int64(1950), highest, "Should use effective (clamped) block values when upper bound is configured")
+		assert.Equal(t, int64(1900), highest, "Should use effective (clamped) block values when upper bound is configured")
 	})
 
 	t.Run("EvmHighestLatestBlockNumber_ReturnsRawValueWhenUpperBoundExceedsLatest", func(t *testing.T) {
@@ -11956,11 +11955,10 @@ func TestNetwork_HighestFinalizedBlockNumber(t *testing.T) {
 		unclampedUpstream.EvmStatePoller().SuggestFinalizedBlock(1850)
 		time.Sleep(50 * time.Millisecond)
 
-		// Fork RHI-8079: effective {1800, 1850} are within noise, so the head is
-		// 1850; the raw values {1900, 1850} would yield 1900.
+		// Second-highest of effective finalized blocks {1800, 1850} = 1800
 		highest := common.EvmHighestFinalizedBlockNumber(network, ctx)
 
-		assert.Equal(t, int64(1850), highest, "Should use effective (clamped) finalized block values when upper bound is configured")
+		assert.Equal(t, int64(1800), highest, "Should use effective (clamped) finalized block values when upper bound is configured")
 	})
 
 	t.Run("EvmHighestFinalizedBlockNumber_ReturnsRawValueWhenUpperBoundExceedsFinalizedBlock", func(t *testing.T) {

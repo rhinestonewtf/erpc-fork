@@ -34,7 +34,7 @@ func TestTrackerHeadStillIgnoresFarAheadPartner(t *testing.T) {
 	net := honest.NetworkId()
 
 	tracker.SetLatestBlockNumber(honest, 100, 0)
-	tracker.SetLatestBlockNumber(rogue, 100+common.DefaultToleratedBlockHeadRollback+1, 0)
+	tracker.SetLatestBlockNumber(rogue, 100+common.CorroboratedHeadLeadTolerance+1, 0)
 
 	assert.Equal(t, int64(100), networkLatest(tracker, net))
 	assert.Equal(t, int64(0), blockHeadLag(tracker, honest))

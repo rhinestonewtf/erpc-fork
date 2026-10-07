@@ -40,7 +40,7 @@ func TestNetworkHead_FarAheadPartner_StillNotServed(t *testing.T) {
 
 	network := setupRealPollLagNetwork(t, ctx, []realPollFixture{
 		{id: "honest", latest: 1000},
-		{id: "rogue", latest: 1000 + common.DefaultToleratedBlockHeadRollback + 1},
+		{id: "rogue", latest: 1000 + common.CorroboratedHeadLeadTolerance + 1},
 	})
 
 	assert.Equal(t, int64(1000), network.EvmHighestLatestBlockNumber(ctx))
