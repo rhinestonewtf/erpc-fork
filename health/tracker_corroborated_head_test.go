@@ -79,7 +79,8 @@ func TestTrackerCorroboratedHeadConcurrentUpdatesDoNotRegress(t *testing.T) {
 	close(c.release)
 	<-firstDone
 	<-secondDone
-	assert.Equal(t, int64(101), networkLatest(tracker, net))
+	// Fork RHI-8079: 102 is within noise of 101, so the leader is the head.
+	assert.Equal(t, int64(102), networkLatest(tracker, net))
 }
 
 func TestTrackerCorroboratedHeadIncludesPollersWithoutRequestMetrics(t *testing.T) {
@@ -109,8 +110,9 @@ func TestTrackerCorroboratedHeadCarriesItsReportersTimestamp(t *testing.T) {
 	tracker.SetLatestBlockNumber(b, 103, 1_800_000_003)
 	tracker.SetLatestBlockNumber(a, 104, 1_800_000_004)
 
-	assert.Equal(t, int64(103), networkLatest(tracker, net))
-	assert.Equal(t, int64(1_800_000_003), networkLatestTimestamp(tracker, net))
+	// Fork RHI-8079: 104 is within noise of 103, so the leader is the head.
+	assert.Equal(t, int64(104), networkLatest(tracker, net))
+	assert.Equal(t, int64(1_800_000_004), networkLatestTimestamp(tracker, net))
 	assert.Equal(t, time.Second, tracker.GetNetworkBlockTime(net))
 }
 
@@ -160,10 +162,11 @@ func TestTrackerCorroboratedLatestHead(t *testing.T) {
 		tracker.SetLatestBlockNumber(b, 999, 0)
 		tracker.SetLatestBlockNumber(c, 100, 0)
 
-		assert.Equal(t, int64(999), networkLatest(tracker, net))
-		assert.Equal(t, int64(0), blockHeadLag(tracker, a), "ahead of the corroborated head is not lag")
-		assert.Equal(t, int64(0), blockHeadLag(tracker, b))
-		assert.Equal(t, int64(899), blockHeadLag(tracker, c))
+		// Fork RHI-8079: 1000 is within noise of 999, so the leader is the head.
+		assert.Equal(t, int64(1000), networkLatest(tracker, net))
+		assert.Equal(t, int64(0), blockHeadLag(tracker, a))
+		assert.Equal(t, int64(1), blockHeadLag(tracker, b))
+		assert.Equal(t, int64(900), blockHeadLag(tracker, c))
 	})
 
 	t.Run("PartialStartup_OutlierReportsFirst", func(t *testing.T) {
@@ -201,9 +204,10 @@ func TestTrackerCorroboratedLatestHead(t *testing.T) {
 		tracker.SetLatestBlockNumber(c, 102, 0)
 
 		assert.Equal(t, int64(102), upstreamLatest(tracker, c))
-		assert.Equal(t, int64(101), networkLatest(tracker, net))
-		assert.Equal(t, int64(1), blockHeadLag(tracker, a))
-		assert.Equal(t, int64(0), blockHeadLag(tracker, b))
+		// Fork RHI-8079: once corrected, c is an honest leader within noise of b.
+		assert.Equal(t, int64(102), networkLatest(tracker, net))
+		assert.Equal(t, int64(2), blockHeadLag(tracker, a))
+		assert.Equal(t, int64(1), blockHeadLag(tracker, b))
 		assert.Equal(t, int64(0), blockHeadLag(tracker, c))
 	})
 

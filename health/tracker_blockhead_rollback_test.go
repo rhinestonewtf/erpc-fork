@@ -221,9 +221,10 @@ func TestTrackerFinalizedBlockRollbackTolerance(t *testing.T) {
 		tracker.SetFinalizedBlockNumber(upsA, 31_000_010)
 
 		assert.Equal(t, int64(31_000_010), upstreamFinalized(tracker, upsA))
-		assert.Equal(t, int64(31_000_005), networkFinalized(tracker, net))
+		// Fork RHI-8079: the corrected head is within noise of the next, so it leads.
+		assert.Equal(t, int64(31_000_010), networkFinalized(tracker, net))
 		assert.Equal(t, int64(0), finalizationLag(tracker, upsA))
-		assert.Equal(t, int64(5), finalizationLag(tracker, upsB))
+		assert.Equal(t, int64(10), finalizationLag(tracker, upsB))
 	})
 }
 
