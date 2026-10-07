@@ -10,9 +10,10 @@ import (
 )
 
 // Fork patch RHI-8079 — see PATCH_LIST.md. Fails if evmHeadReference stops
-// calling common.CorroboratedHeadIndex: the head behind `latest`/`finalized`
+// calling common.CorroboratedHead: the head behind `latest`/`finalized`
 // interpolation and the eth_blockNumber floor must be the fresher of two
-// honest upstreams, not the lagging one.
+// honest upstreams, capped when the leader runs far ahead, and never a far-off
+// outlier.
 
 func TestNetworkHead_TwoHonestUpstreams_ServesTheFresher(t *testing.T) {
 	util.ResetGock()
@@ -31,7 +32,22 @@ func TestNetworkHead_TwoHonestUpstreams_ServesTheFresher(t *testing.T) {
 	assert.Equal(t, int64(990), network.EvmHighestFinalizedBlockNumber(ctx))
 }
 
-func TestNetworkHead_FarAheadPartner_StillNotServed(t *testing.T) {
+func TestNetworkHead_LeaderFarAhead_IsCapped(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	network := setupRealPollLagNetwork(t, ctx, []realPollFixture{
+		{id: "fresh", latest: 1000},
+		{id: "slow", latest: 950},
+	})
+
+	assert.Equal(t, 950+common.CorroboratedHeadLeadTolerance, network.EvmHighestLatestBlockNumber(ctx))
+}
+
+func TestNetworkHead_FarOffPartner_StillNotServed(t *testing.T) {
 	util.ResetGock()
 	defer util.ResetGock()
 
@@ -40,7 +56,7 @@ func TestNetworkHead_FarAheadPartner_StillNotServed(t *testing.T) {
 
 	network := setupRealPollLagNetwork(t, ctx, []realPollFixture{
 		{id: "honest", latest: 1000},
-		{id: "rogue", latest: 1000 + common.CorroboratedHeadLeadTolerance + 1},
+		{id: "rogue", latest: 1000 + common.DefaultToleratedBlockHeadRollback + 1},
 	})
 
 	assert.Equal(t, int64(1000), network.EvmHighestLatestBlockNumber(ctx))

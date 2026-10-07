@@ -43,8 +43,8 @@ grep -q 'strconv.ParseUint(s, 10, 64)' common/utils.go && echo OK
 grep -q '"wss://"' common/defaults.go && echo OK
 grep -q "pnpm@" Dockerfile && echo OK
 grep -q "resolveRateLimiterRedisTarget" upstream/ratelimiter_registry.go && echo OK
-grep -q "CorroboratedHeadIndex" health/tracker.go && echo OK
-grep -q "CorroboratedHeadIndex" erpc/networks.go && echo OK
+grep -q "common.CorroboratedHead(" health/tracker.go && echo OK
+grep -q "common.CorroboratedHead(" erpc/networks.go && echo OK
 test -f erpc-prod.yaml && echo OK
 test -f buildspec-amd64.yml && echo OK
 test -f buildspec-arm64.yml && echo OK
@@ -73,7 +73,7 @@ around it.
 | `9d91a08d` (part of "update prod config") treat `ws://`/`wss://` endpoints as providers | `common/defaults.go` | `"wss://"` in `common/defaults.go` |
 | `174471cd` fix(docker): pin pnpm to the packageManager version (#7) | `Dockerfile` | `pnpm@` in `Dockerfile` (i.e. a version, not bare `pnpm`) |
 | `38089810` fix(ratelimiter): parse rediss:// URI for the Redis store (RHI-6529, #9) | `upstream/ratelimiter_redis_target.go`, `upstream/ratelimiter_redis_target_test.go`, `upstream/ratelimiter_registry.go` | `resolveRateLimiterRedisTarget` called in `ratelimiter_registry.go` |
-| `5e597c39` fix(health): serve the fresher head when upstreams differ only by lag noise (RHI-8079, #12) | `common/head_noise_tolerance.go` (+ `_test`), call sites in `health/tracker.go` and `erpc/networks.go`; new tests in `health/`, `erpc/`, `internal/policy/`; updated expectations in `health/tracker_*_test.go`, `erpc/networks_served_tip_test.go`, `erpc/networks_selection_policy_realpoll_test.go`; `docs/pages/reference/evm/block-tracking.mdx` | `CorroboratedHeadIndex` called in both `health/tracker.go` and `erpc/networks.go` |
+| `5e597c39` fix(health): serve the fresher head when upstreams differ only by lag noise (RHI-8079, #12), plus the cap follow-up (RHI-8079, #13 — hash added on merge; fold into one commit at the next sync) | `common/head_noise_tolerance.go` (+ `_test`), call sites in `health/tracker.go` (head + block-time sample) and `erpc/networks.go`; new tests in `health/`, `erpc/`, `internal/policy/`; updated expectations in `health/tracker_*_test.go`, `erpc/networks_test.go`, `erpc/networks_served_tip_test.go`, `erpc/networks_selection_policy_realpoll_test.go`; `docs/pages/reference/evm/block-tracking.mdx` | `common.CorroboratedHead(` called in both `health/tracker.go` and `erpc/networks.go` |
 
 **RHI-6277 — gas-limit rejections are terminal.** A rejection of the transaction's gas
 limit is classified `ErrEndpointExecutionException` and **not** marked retryable toward
@@ -139,23 +139,29 @@ every network in our prod config — that is always the *lower* head: `latest` i
 interpolated to the lagging upstream while `eth_blockNumber` reports the fresher one, so
 a client that waits for block N and reads `latest` gets N-1 for up to a poll cycle. On
 2026-10-06 that made the orchestrator size four Ethereum deposits from their pre-deposit
-balance, and they bridged dust. `CorroboratedHeadIndex` serves the highest head when it
-leads the next by at most `CorroboratedHeadLeadTolerance` (16, the default policy's
-`blockNumberLagAbove`), else the second-highest. It drives both the tracker head (lag) and
-the default `latest`/`finalized` interpolation; majority (`servedTip`) mode is untouched.
-SVM feeds the same tracker, so its slot head follows the same rule.
+balance, and they bridged dust. `CorroboratedHead` serves the highest head when it leads
+the second-highest by at most `CorroboratedHeadLeadTolerance` (16, the default policy's
+`blockNumberLagAbove`), caps it at the second-highest + 16 for a lead up to
+`DefaultToleratedBlockHeadRollback` (1024), and serves the second-highest beyond that (an
+outlier). The cap is what keeps the head monotonic: the first version (#12) dropped to the
+second-highest past 16, and on dev fast chains (`4663`, `143`, `421614`) the head then
+sawtoothed back 8–16 blocks every few seconds as the leader outran a 5s poller. While
+capped, the block-time EMA samples the leader's own block and timestamp, never the capped
+number. It drives both the tracker head (lag) and the default `latest`/`finalized`
+interpolation; majority (`servedTip`) mode is untouched. SVM feeds the same tracker, so its
+slot head follows the same rule.
 
 *Upstreamable:* worth proposing, but upstream chose "N=2 → the lower head" deliberately
 (see the `PickServedTip` doc comment), so expect a discussion rather than a quick merge.
 If it lands upstream, delete this patch.
 
-*Rebase risk:* low for the logic (its own file, two one-line call sites). The likely
-conflicts are the upstream test expectations we changed for 1–5 block gaps — keep ours.
+*Rebase risk:* low for the logic (its own file; a short block in `corroboratedNetworkHead`,
+the block-time sample line, and one line in `evmHeadReference`). The likely conflicts are
+the upstream test expectations we changed for 1–50 block gaps — keep ours.
 `TestCorroboratedHeadLeadTolerance_MatchesDefaultPolicyLagThreshold` fails if upstream
-moves the default policy's lag threshold, and the new `*_head_noise_tolerance_test.go`
-files fail if either call site is dropped. Fast chains whose slowest head poller refreshes
-less often than every ~16 blocks fall back to upstream behaviour; that is a poller-config
-question, not this patch.
+moves the default policy's lag threshold; the new `*_head_noise_tolerance_test.go` files
+fail if either call site is dropped, and `TestTrackerHeadLeaderRunningAwayIsCappedNotDropped`
+fails if the head can move back or block time stops being sampled while capped.
 
 **Base-10 quantity tolerance.** Some upstreams return EVM quantities as base-10 strings
 instead of `0x`-prefixed hex, which broke upstream health tracking. `HexToUint64` /
