@@ -287,14 +287,14 @@ func TestNetworkPolicy_RealPoll_WithinTolerance_NoneExcluded(t *testing.T) {
 	defer cancel()
 
 	network := setupRealPollLagNetwork(t, ctx, []realPollFixture{
-		{id: "u1", latest: 1000},
-		{id: "u2", latest: 998}, // the corroborated head (second-highest)
-		{id: "u3", latest: 995}, // 3 behind it — still within the 16-block tolerance
+		{id: "u1", latest: 1000}, // fork RHI-8079: within noise of u2, so the head
+		{id: "u2", latest: 998},
+		{id: "u3", latest: 995}, // 5 behind it — still within the 16-block tolerance
 	})
 
 	require.EqualValues(t, 0, blockHeadLagOf(t, network, "u1"))
-	require.EqualValues(t, 0, blockHeadLagOf(t, network, "u2"))
-	require.EqualValues(t, 3, blockHeadLagOf(t, network, "u3"))
+	require.EqualValues(t, 2, blockHeadLagOf(t, network, "u2"))
+	require.EqualValues(t, 5, blockHeadLagOf(t, network, "u3"))
 
 	order, excluded := policy.LatestDecisionOutputForTest(network.policyEngine, network.networkId, "*")
 	assert.NotContains(t, excluded, "u1")

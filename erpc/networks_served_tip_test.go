@@ -371,8 +371,10 @@ func TestServedTip_DisabledByDefault_ReturnsCorroboratedHead(t *testing.T) {
 	}, nil) // nil ServedTip config => feature disabled
 
 	served := network.EvmHighestLatestBlockNumber(ctx)
-	assert.Equal(t, int64(99), served,
-		"default mode serves the second-highest head, not MAX(tips)=100")
+	// Fork RHI-8079: 100 is within noise of 99, so the leader is the head; the
+	// majority pick would be 99.
+	assert.Equal(t, int64(100), served,
+		"default mode serves the corroborated head, not the majority pick")
 }
 
 // A lone upstream reporting another chain's height must not define the network

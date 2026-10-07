@@ -131,17 +131,18 @@ func TestTrackerLatestBlockRollbackTolerance(t *testing.T) {
 		tracker.SetLatestBlockNumber(upsA, 32_000_100, 0)
 
 		assert.Equal(t, int64(32_000_100), upstreamLatest(tracker, upsA))
-		assert.Equal(t, int64(32_000_050), networkLatest(tracker, net),
-			"network head stays at the second-highest reporter")
+		// Fork RHI-8079: the corrected head is within noise of the next, so it leads.
+		assert.Equal(t, int64(32_000_100), networkLatest(tracker, net),
+			"network head follows the corrected reporter")
 		assert.Equal(t, int64(0), blockHeadLag(tracker, upsA))
-		assert.Equal(t, int64(50), blockHeadLag(tracker, upsB))
-		assert.Equal(t, int64(0), blockHeadLag(tracker, upsC))
+		assert.Equal(t, int64(100), blockHeadLag(tracker, upsB))
+		assert.Equal(t, int64(50), blockHeadLag(tracker, upsC))
 
-		assert.Equal(t, float64(32_000_050),
+		assert.Equal(t, float64(32_000_100),
 			promUtil.ToFloat64(tracker.getLatestBlockGauge(tracker.projectId, "*", upsA.NetworkLabel(), "*")))
 		assert.Equal(t, float64(32_000_100),
 			promUtil.ToFloat64(tracker.getLatestBlockGauge(tracker.projectId, upsA.VendorName(), upsA.NetworkLabel(), upsA.Id())))
-		assert.Equal(t, float64(50),
+		assert.Equal(t, float64(100),
 			promUtil.ToFloat64(tracker.getHeadLagGauge(tracker.projectId, upsB.VendorName(), upsB.NetworkLabel(), upsB.Id())))
 	})
 
@@ -221,9 +222,10 @@ func TestTrackerFinalizedBlockRollbackTolerance(t *testing.T) {
 		tracker.SetFinalizedBlockNumber(upsA, 31_000_010)
 
 		assert.Equal(t, int64(31_000_010), upstreamFinalized(tracker, upsA))
-		assert.Equal(t, int64(31_000_005), networkFinalized(tracker, net))
+		// Fork RHI-8079: the corrected head is within noise of the next, so it leads.
+		assert.Equal(t, int64(31_000_010), networkFinalized(tracker, net))
 		assert.Equal(t, int64(0), finalizationLag(tracker, upsA))
-		assert.Equal(t, int64(5), finalizationLag(tracker, upsB))
+		assert.Equal(t, int64(10), finalizationLag(tracker, upsB))
 	})
 }
 

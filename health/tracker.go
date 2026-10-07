@@ -1394,7 +1394,7 @@ func (t *Tracker) corroboratedNetworkHead(ntwMeta *NetworkMetadata, net string, 
 	if pick.Inputs == 0 {
 		return 0, nil
 	}
-	corroborated := pick.Sorted[min(1, pick.Inputs-1)]
+	corroborated := pick.Sorted[common.CorroboratedHeadIndex(pick.Sorted)]
 	for _, r := range ntwMeta.reporters {
 		if r.Id() == corroborated.UpstreamID {
 			return corroborated.BlockNumber, r
