@@ -50,7 +50,7 @@ test -f erpc-prod.yaml && echo OK
 test -f buildspec-amd64.yml && echo OK
 test -f buildspec-arm64.yml && echo OK
 test -f .github/workflows/docker.yaml && echo OK
-test -f promote-to-prod.sh && echo OK
+test -f sync-with-upstream.sh && echo OK
 test -f PATCH_LIST.md && echo OK
 grep -q "This is a fork" CLAUDE.md && echo OK
 ```
@@ -217,7 +217,7 @@ as needing provider conversion; they don't.
 | `9d91a08d` update prod config | `erpc-prod.yaml` — the production network/upstream config |
 | `35384bf7` Cleanup workflows | deletes upstream's CI (benchmark, codeql, dependency-review, release, scorecards, test, xray). We build an image from upstream code and trust it; upstream CI is noise, and `xray.yml` additionally wants secrets. **New upstream workflows do not conflict — they simply appear.** Check `.github/workflows/` after every sync: 0.3.0 added `xray.yml` and the rebase carried it in silently. |
 | `e3b15f16` Setup minimal CI | our own minimal workflow set |
-| `d8a76c5d` Add promote-to-prod script | `promote-to-prod.sh`, `release.sh`, `sync-with-upstream.sh` |
+| `d8a76c5d` Add the upstream-sync script | `sync-with-upstream.sh` (its `promote-to-prod.sh` and `release.sh` were [removed](#removed-patches)) |
 | `cdcdb2fe` feat(ci): CodeBuild multi-arch images (RHI-5507, #4) | `buildspec-amd64.yml`, `buildspec-arm64.yml`, `.github/workflows/docker.yaml` |
 | `39a1fc61` ci: `workflow_dispatch` trigger (RHI-5509, #5) | `.github/workflows/docker.yaml` |
 
@@ -233,6 +233,32 @@ upstream's file with our section appended, so a rebase may conflict there: keep 
 appended section and take upstream's version of the rest.
 
 ## Removed patches
+
+**`d8a76c5d` (part) the `release` branch as the production deploy path** — `promote-to-prod.sh`,
+`release.sh`, and the `release` entries in `.github/workflows/docker.yaml` (removed 2026-10-08).
+
+Pushing `main` to `release` built an image tagged `prod` and dispatched the infra promote
+workflow with `env=prod`. Two things were wrong with it, both found while shipping RHI-8113:
+
+- **It did not describe production.** `release` sat 40 commits behind `main`, while prod was
+  running `799f930` — a commit on `main` that had never reached `release`. The deployed
+  artifact is recorded in `terraform-aws/environments/argocd/apps/rpc-proxy/values-prod.yaml`
+  in the infra repo; the branch was stale bookkeeping that read like a source of truth.
+- **It shipped a different image than the one that was soaked.** Promotion rebuilt from
+  whatever `main` pointed at, so a docs commit landing after a soak meant prod got an image
+  no one had run. Validation on dev did not transfer.
+
+Prod is now promoted by dispatching `aws-promote-app-version.yaml` in `rhinestonewtf/infra`
+with `env=prod`, `app_name=rpc-proxy`, and the SHA already on dev, which moves the existing
+image rather than building a new one:
+
+```bash
+gh workflow run aws-promote-app-version.yaml --repo rhinestonewtf/infra \
+  -f env=prod -f app_name=rpc-proxy -f version_sha=<sha already on dev>
+```
+
+The run waits on the `prod-apps` GitHub environment for approval. `sync-with-upstream.sh` is
+unaffected and still the rebase tool.
 
 **`29e35fc7` fix: make near-head `ErrEndpointMissingData` retryable towards upstream**
 (fork PR #2, merged 2026-02-23, dropped 2026-02-25, formally removed 2026-08-28).
