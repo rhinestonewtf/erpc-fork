@@ -2,7 +2,7 @@ name: Build and push Docker image
 
 on:
   push:
-    branches: ["main", "release"]
+    branches: ["main"]
   workflow_dispatch:
 
 jobs:
@@ -58,12 +58,13 @@ jobs:
           # Derive version from the nearest upstream tag (e.g. 0.0.62-2-g2fe6ca3)
           BASE_VERSION=$(git describe --tags --always)
           VERSION="custom-${BASE_VERSION}"
+          # Only dev auto-deploys. Prod is promoted by dispatching infra's
+          # aws-promote-app-version.yaml with the SHA that has been soaking on
+          # dev, so prod runs a byte-identical image rather than a rebuild of a
+          # later commit. There is deliberately no branch that deploys to prod.
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
             TAGS="dev latest"
             DEPLOYMENT_ENV="dev"
-          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
-            TAGS="prod"
-            DEPLOYMENT_ENV="prod"
           else
             # Use branch name as tag, sanitized for Docker tag format
             TAGS=$(echo "$GITHUB_REF_NAME" | sed 's/[^a-zA-Z0-9._-]/-/g')
