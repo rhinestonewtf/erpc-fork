@@ -45,6 +45,7 @@ grep -q "pnpm@" Dockerfile && echo OK
 grep -q "resolveRateLimiterRedisTarget" upstream/ratelimiter_registry.go && echo OK
 grep -q "common.CorroboratedHead(" health/tracker.go && echo OK
 grep -q "common.CorroboratedHead(" erpc/networks.go && echo OK
+grep -q "pollFinalizedBlockNumberScheduled" architecture/evm/evm_state_poller.go && echo OK
 test -f erpc-prod.yaml && echo OK
 test -f buildspec-amd64.yml && echo OK
 test -f buildspec-arm64.yml && echo OK
@@ -74,6 +75,7 @@ around it.
 | `174471cd` fix(docker): pin pnpm to the packageManager version (#7) | `Dockerfile` | `pnpm@` in `Dockerfile` (i.e. a version, not bare `pnpm`) |
 | `38089810` fix(ratelimiter): parse rediss:// URI for the Redis store (RHI-6529, #9) | `upstream/ratelimiter_redis_target.go`, `upstream/ratelimiter_redis_target_test.go`, `upstream/ratelimiter_registry.go` | `resolveRateLimiterRedisTarget` called in `ratelimiter_registry.go` |
 | `5e597c39` fix(health): serve the fresher head when upstreams differ only by lag noise (RHI-8079, #12), plus `2000d223` fix(health): cap the corroborated head lead instead of dropping it (RHI-8079, #13) — fold into one commit at the next sync | `common/head_noise_tolerance.go` (+ `_test`), call sites in `health/tracker.go` (head + block-time sample) and `erpc/networks.go`; new tests in `health/`, `erpc/`, `internal/policy/`; updated expectations in `health/tracker_*_test.go`, `erpc/networks_test.go`, `erpc/networks_served_tip_test.go`, `erpc/networks_selection_policy_realpoll_test.go`; `docs/pages/reference/evm/block-tracking.mdx` | `common.CorroboratedHead(` called in both `health/tracker.go` and `erpc/networks.go` |
+| `4234412f` feat(evm): debounce the finalized poll on finality period, not block time (RHI-8113, #14) | `architecture/evm/evm_state_poller_finalized_debounce.go` (+ `_test`), call sites in `architecture/evm/evm_state_poller.go`, `docs/pages/reference/evm/block-tracking.mdx` | `pollFinalizedBlockNumberScheduled` called in `evm_state_poller.go` |
 
 **RHI-6277 — gas-limit rejections are terminal.** A rejection of the transaction's gas
 limit is classified `ErrEndpointExecutionException` and **not** marked retryable toward
@@ -162,6 +164,40 @@ the upstream test expectations we changed for 1–50 block gaps — keep ours.
 moves the default policy's lag threshold; the new `*_head_noise_tolerance_test.go` files
 fail if either call site is dropped, and `TestTrackerHeadLeaderRunningAwayIsCappedNotDropped`
 fails if the head can move back or block time stops being sampled while capped.
+
+**RHI-8113 — the scheduled finalized poll debounces on finality period.** Upstream gates
+both the `latest` and the `finalized` state-poller fetch on `resolveDebounce()`, which is
+derived from estimated block production time. That is right for the head, which advances
+once per block, and wrong for finality: Ethereum finalises at 32-slot/12s epoch
+boundaries — 384s — and every chain deriving its `finalized` tag from L1 finality inherits
+that cadence while producing blocks every second or two, so the pointer is polled two to
+three orders of magnitude more often than it can change. `resolveFinalizedDebounce()`
+gates the **scheduled** fetch on `finalityPeriod × 0.7` from a per-chain consensus table;
+a chain absent from it falls through to `resolveDebounce()`, which is already correct for
+the chains that finalise every block. Measured on prod: 37.4 → 14.6 polls/s, ~$1,017 →
+~$411/mo.
+
+The on-demand path (`PollFinalizedBlockNumber`, reached from `EvmIsBlockFinalized` with
+`forceFreshIfStale`) deliberately keeps `resolveDebounce()`, so upstream selection is
+untouched and only standing background traffic is slowed. Lagging is one-directional: a
+finalized pointer behind reality delays cache promotion and can never mark an unfinalized
+block as final.
+
+The periods are **code constants, not config**, and must stay that way. eRPC parses config
+with `KnownFields(true)`, so a `finalityPeriod` key in the deployed YAML would turn this
+patch being dropped in a rebase into an rpc-proxy start-up failure instead of a silent
+revert to upstream behaviour — the exact failure this file exists to catch, made worse.
+
+*Upstreamable:* yes, nothing here is Rhinestone-specific — though the table would want a
+broader source than our 26 chains before it went up. Never proposed.
+
+*Rebase risk:* low for the logic (its own file), but the **call site is where it dies
+quietly**: if a rebase keeps the new file and reverts the two lines in
+`evm_state_poller.go`, everything still compiles and the patch becomes a no-op. That is
+what the probe checks, and `TestPollFinalizedBlockNumberWiring` fails on it.
+`TestFinalityPeriodTable` pins the 17 entries and asserts the 9 deliberate omissions, so a
+chain moving between groups cannot pass as a one-character diff. Note Ronin's 240s is the
+one value measured rather than derived from a documented mechanism — see RHI-8113.
 
 **Base-10 quantity tolerance.** Some upstreams return EVM quantities as base-10 strings
 instead of `0x`-prefixed hex, which broke upstream health tracking. `HexToUint64` /
