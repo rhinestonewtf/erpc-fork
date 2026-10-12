@@ -123,6 +123,20 @@ func (n *bundleTestNetwork) inflightCount() int {
 	return len(kt.inflight)
 }
 
+// nonceReads is how many eth_getTransactionCount reads keep-alive has made. It
+// makes one for each new head it processes.
+func (n *bundleTestNetwork) nonceReads() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	reads := 0
+	for _, c := range n.calls {
+		if c.method == "eth_getTransactionCount" {
+			reads++
+		}
+	}
+	return reads
+}
+
 func (n *bundleTestNetwork) keptCount() int {
 	k := keepAliveFor(n)
 	k.mu.Lock()
@@ -481,36 +495,40 @@ func TestBundleKeepAlive_RetriesTargetBlocksThatFailed(t *testing.T) {
 		attempts[block]++
 		first := attempts[block] == 1
 		mu.Unlock()
-		if first && (block == "0x66" || block == "0x67") {
-			// Rejected after h+1 is accepted, the order the review flagged.
-			time.Sleep(30 * time.Millisecond)
+		if first && (block == "0x65" || block == "0x67") {
+			// Rejected after h+2 is accepted and after keep-alive has
+			// processed head 100, which it reads the nonce for: the orders
+			// two reviews flagged. No new head comes to retry them.
+			for deadline := time.Now().Add(2 * time.Second); n.nonceReads() == 0 && time.Now().Before(deadline); {
+				time.Sleep(time.Millisecond)
+			}
+			time.Sleep(20 * time.Millisecond)
 			return nil, fmt.Errorf("relay rejected block %s", block)
 		}
 		return acceptBundle(ctx, req)
 	}
 
-	// The relay accepts h+1 but rejects h+2 and h+3: the caller is still answered.
+	// The relay accepts h+2 but rejects h+1 and h+3: the caller is still answered.
 	_, resp, err := HandleProjectPreForward(context.Background(), n, sendRawTxRequest(`"`+sendRawTxFixture+`"`))
 	require.NoError(t, err)
 	require.NotNil(t, resp)
-	waitForBundles(t, n, 3)
-	require.Eventually(t, func() bool { return n.inflightCount() == 0 }, 2*time.Second, 2*time.Millisecond,
-		"both rejections are recorded against the kept transaction")
 
-	// The next head retries the rejected blocks along with the newly reachable one.
+	// The head stays at 100, so h+1 can still be built: both rejected blocks
+	// are resubmitted now, not once the next head has made h+1 current.
+	waitForBundles(t, n, 5)
+	assert.Equal(t, []string{"0x65", "0x65", "0x66", "0x67", "0x67"}, n.bundleBlocks(),
+		"a target block whose submission failed must be resubmitted while it is still ahead")
+	require.Eventually(t, func() bool { return n.inflightCount() == 0 }, 2*time.Second, 2*time.Millisecond)
+
+	// Once accepted, the retried blocks are not submitted again: the next head
+	// adds only the block it brings into reach.
 	n.latest.Store(101)
 	waitForBundles(t, n, 6)
-	assert.Equal(t, []string{"0x65", "0x66", "0x66", "0x67", "0x67", "0x68"}, n.bundleBlocks(),
-		"a target block whose submission failed must be resubmitted, not assumed covered")
-
-	// Once accepted, the retried blocks are not submitted again.
-	n.latest.Store(102)
-	waitForBundles(t, n, 7)
 	time.Sleep(30 * time.Millisecond)
-	assert.Equal(t, []string{"0x65", "0x66", "0x66", "0x67", "0x67", "0x68", "0x69"}, n.bundleBlocks())
+	assert.Equal(t, []string{"0x65", "0x65", "0x66", "0x67", "0x67", "0x68"}, n.bundleBlocks())
 
 	n.onChainNonce.Store(sendRawTxFixtureNonce + 1)
-	n.latest.Store(103)
+	n.latest.Store(102)
 	require.Eventually(t, func() bool { return n.keptCount() == 0 }, 2*time.Second, 2*time.Millisecond)
 }
 

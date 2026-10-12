@@ -33,7 +33,7 @@ const bundleSubmissionDetachedTimeout = 30 * time.Second
 const bundleKeepAliveMaxKept = 10_000
 
 // bundleKeepAliveTick is how often the keep-alive loop looks for a new network
-// head.
+// head and submits target blocks that are due.
 const bundleKeepAliveTick = time.Second
 
 // bundleKeepAliveTickOverride, when non-zero, replaces bundleKeepAliveTick in
@@ -351,12 +351,17 @@ func (k *bundleKeepAlive) run() {
 		if !k.prune(cfg, time.Now()) {
 			return
 		}
-		head := common.EvmHighestLatestBlockNumber(k.network, context.Background())
-		if head <= lastHead {
-			continue
+		// A nonce only moves with a new block, so settling waits for a new
+		// head. Submitting does not: a target block whose submission failed
+		// after its head was processed is resubmitted on the next tick, while
+		// it can still be included, not once a new head has made it current.
+		if head := common.EvmHighestLatestBlockNumber(k.network, context.Background()); head > lastHead {
+			lastHead = head
+			k.settle()
 		}
-		lastHead = head
-		k.step(cfg, head)
+		if lastHead > 0 {
+			k.submitDue(cfg, lastHead)
+		}
 	}
 }
 
@@ -390,11 +395,9 @@ func (k *bundleKeepAlive) prune(cfg *common.BundleSubmissionConfig, now time.Tim
 	return true
 }
 
-// step settles transactions whose sender's nonce has moved past them, then
-// submits the rest for every target block (head+1 … head+targetBlocks) that no
-// relay has accepted and no submission is running for: the block the new head
-// brings into reach, and any earlier one whose submission failed.
-func (k *bundleKeepAlive) step(cfg *common.BundleSubmissionConfig, head int64) {
+// settle stops keeping transactions whose sender's nonce has moved past them:
+// they were included, or replaced.
+func (k *bundleKeepAlive) settle() {
 	k.mu.Lock()
 	senders := make(map[string]struct{}, len(k.kept))
 	for _, kt := range k.kept {
@@ -403,6 +406,23 @@ func (k *bundleKeepAlive) step(cfg *common.BundleSubmissionConfig, head int64) {
 	k.mu.Unlock()
 	nonces := k.latestNonces(senders)
 
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for hash, kt := range k.kept {
+		if onChain, ok := nonces[kt.tx.sender]; ok && onChain > kt.tx.nonce {
+			delete(k.kept, hash)
+			k.record(telemetry.BundleKeepAliveOutcomeSettled)
+		}
+	}
+	k.updateGauge()
+}
+
+// submitDue submits kept transactions for every target block (head+1 …
+// head+targetBlocks) that no relay has accepted and no submission is running
+// for: the block a new head brings into reach, and any one whose submission
+// failed. A block is not resubmitted while its last submission is running, so
+// a failing relay gets at most one retry per block per tick.
+func (k *bundleKeepAlive) submitDue(cfg *common.BundleSubmissionConfig, head int64) {
 	type resubmission struct {
 		hash   string
 		raw    string
@@ -412,11 +432,6 @@ func (k *bundleKeepAlive) step(cfg *common.BundleSubmissionConfig, head int64) {
 	upTo := head + int64(cfg.TargetBlocks)
 	k.mu.Lock()
 	for hash, kt := range k.kept {
-		if onChain, ok := nonces[kt.tx.sender]; ok && onChain > kt.tx.nonce {
-			delete(k.kept, hash)
-			k.record(telemetry.BundleKeepAliveOutcomeSettled)
-			continue
-		}
 		for b := range kt.accepted {
 			if b <= head {
 				delete(kt.accepted, b)
@@ -440,7 +455,6 @@ func (k *bundleKeepAlive) step(cfg *common.BundleSubmissionConfig, head int64) {
 			due = append(due, resubmission{hash: hash, raw: kt.tx.raw, blocks: blocks})
 		}
 	}
-	k.updateGauge()
 	k.mu.Unlock()
 
 	lg := k.network.Logger().With().Str("hook", "bundleSubmission").Logger()
