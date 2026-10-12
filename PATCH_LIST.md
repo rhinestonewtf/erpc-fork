@@ -44,6 +44,8 @@ grep -q "resolveRateLimiterRedisTarget" upstream/ratelimiter_registry.go && echo
 grep -q "common.CorroboratedHead(" health/tracker.go && echo OK
 grep -q "common.CorroboratedHead(" erpc/networks.go && echo OK
 grep -q "pollFinalizedBlockNumberScheduled" architecture/evm/evm_state_poller.go && echo OK
+grep -q "BlockTimestamp" data/connector.go && echo OK
+grep -q "latestBlockShared.TryUpdateIfStale(" architecture/evm/evm_state_poller.go && echo OK
 test -f erpc-prod.yaml && echo OK
 test -f buildspec-amd64.yml && echo OK
 test -f buildspec-arm64.yml && echo OK
@@ -72,6 +74,7 @@ around it.
 | `ade471ae` fix(ratelimiter): parse rediss:// URI for the Redis store (RHI-6529, #9) | `upstream/ratelimiter_redis_target.go`, `upstream/ratelimiter_redis_target_test.go`, `upstream/ratelimiter_registry.go` | `resolveRateLimiterRedisTarget` called in `ratelimiter_registry.go` |
 | `a503823d` fix(health): serve the corroborated head within lag noise, capped (RHI-8079, #12, #13) | `common/head_noise_tolerance.go` (+ `_test`), call sites in `health/tracker.go` (head + block-time sample) and `erpc/networks.go`; new tests in `health/`, `erpc/`, `internal/policy/`; updated expectations in `health/tracker_*_test.go`, `erpc/networks_test.go`, `erpc/networks_served_tip_test.go`, `erpc/networks_selection_policy_realpoll_test.go`; `docs/pages/reference/evm/block-tracking.mdx` | `common.CorroboratedHead(` called in both `health/tracker.go` and `erpc/networks.go` |
 | `61db4a8e` feat(evm): debounce the finalized poll on finality period, not block time (RHI-8113, #14) | `architecture/evm/evm_state_poller_finalized_debounce.go` (+ `_test`), call sites in `architecture/evm/evm_state_poller.go`, `docs/pages/reference/evm/block-tracking.mdx` | `pollFinalizedBlockNumberScheduled` called in `evm_state_poller.go` |
+| `0fcffa82` feat(data): carry the block timestamp through shared state; latest poll back on the shared clock (RHI-8244) | `data/shared_state_block_timestamp.go` (+ `_test`), `architecture/evm/evm_state_poller_shared_clock_test.go`; signature changes in `data/connector.go`, `data/shared_state_variable.go`, call sites in `architecture/evm/evm_state_poller.go`, `architecture/svm/svm_state_poller.go`, `upstream/upstream.go`; `docs/pages/reference/evm/block-tracking.mdx` | `BlockTimestamp` in `data/connector.go`, and `latestBlockShared.TryUpdateIfStale(` (not `IfLocallyStale`) in `evm_state_poller.go` |
 
 **RHI-6277 — gas-limit rejections are terminal.** A rejection of the transaction's gas
 limit is classified `ErrEndpointExecutionException` and **not** marked retryable toward
@@ -181,6 +184,41 @@ what the probe checks, and `TestPollFinalizedBlockNumberWiring` fails on it.
 `TestFinalityPeriodTable` pins the 17 entries and asserts the 9 deliberate omissions, so a
 chain moving between groups cannot pass as a one-character diff. Note Ronin's 240s is the
 one value measured rather than derived from a documented mechanism — see RHI-8113.
+
+**RHI-8244 — the block timestamp travels with the head; the `latest` poll stays on the
+shared clock.** Upstream 0.4.0 (#1208) moved the EVM `latest` poll from the shared
+staleness clock (`TryUpdateIfStale`, one fetch per cluster per debounce window) to a
+replica-local one (`TryUpdateIfLocallyStale`, one fetch per pod per window), because a
+replica that only ever *received* a head through the shared counter had no block
+timestamp to feed its block-time EMA, so its debounce sat on the fixed fallback. Upstream's
+own docs now say polling cost scales with replica count; on prod that is a 2–3× multiplier
+on the `latest` half of every chain's idle floor. This patch fixes the starvation the other
+way round: `CounterInt64State` gains an optional `bt` field, the counter stores it beside
+the value on every accepted change and hands both to `OnValue`, and the poller's `latest`
+fetch goes back to `TryUpdateIfStale`. A head that arrives without a timestamp
+(`SuggestLatestBlock`, or a peer on the previous wire format) is held as unknown; when the
+same head arrives again with one, `adoptBlockTimestamp` fills it in once and fires the
+callback, which the 0.4.0 tracker already accepts as a matched observation. The field is
+`omitempty` and readers ignore unknown fields, so a mixed-version rollout needs no schema
+bump.
+
+The signatures changed deliberately rather than adding timestamp-carrying variants beside
+the old methods: `getNewValue` returns `(value, blockTimestamp, err)` and `OnValue` takes
+`(value, blockTimestamp)`. A clash with upstream at the next sync is the review prompt we
+want, not something to route around (decided 2026-10-12).
+
+*Upstreamable:* yes, this is the fix upstream should have shipped instead of #1208, and
+the intent is to propose it once it has soaked on prod. If upstream takes it, delete this
+patch.
+
+*Rebase risk:* medium. `data/shared_state_variable.go` is upstream-active (#1208 was the
+last touch); our edits there are the interface, six short hook lines in `processNewState` /
+`processNewValue`, the refresh result, and `localState`. The adoption logic is its own file.
+The call site that dies quietly is the one in `PollLatestBlockNumber`: a rebase that takes
+upstream's `TryUpdateIfLocallyStale` line compiles and silently restores the per-pod poll,
+which is what the probe and `TestPollLatestBlockNumberUsesTheSharedClock` catch.
+`TestBlockTimestamp_ReceivingReplicaSamplesBlockTime` fails if the timestamp stops reaching
+a receiving replica's tracker.
 
 **Base-10 quantity tolerance.** Some upstreams return EVM quantities as base-10 strings
 instead of `0x`-prefixed hex, which broke upstream health tracking. `HexToUint64` /
