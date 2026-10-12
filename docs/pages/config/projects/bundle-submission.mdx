@@ -116,8 +116,9 @@ transaction never enters the normal path. For each request it:
 1. Decodes the signed transaction to get its hash, sender and nonce. A transaction is
    rejected as an invalid request, and nothing is sent anywhere, if it can't be decoded,
    has no recoverable sender, or is signed for another chain.
-2. Reads the network head `N`: the highest latest block across the network's upstreams. If
-   no upstream has reported a head yet, it returns a retryable error and sends nothing.
+2. Reads the network head `N`: the block eRPC serves as `latest`, corroborated across the
+   network's upstreams (see [block tracking](/reference/evm/block-tracking)). If no
+   upstream has reported a head yet, it returns a retryable error and sends nothing.
 3. Builds `targetBlocks` bundles, one for each of blocks `N+1` to `N+targetBlocks`. Each
    bundle is `bundleFields`, copied verbatim, plus `txs: [<raw tx>]` and
    `blockNumber: <hex>`.
