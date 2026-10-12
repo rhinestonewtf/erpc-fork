@@ -170,14 +170,16 @@ func NewSvmStatePoller(
 	// counter — and stays silent when the counter rejects a lower slot, so the
 	// tracker can never be fed a slot the counter itself refused.
 	if tracker != nil {
-		latestShared.OnValue(func(value int64, _ int64) {
+		latestShared.OnValue(func(obs data.CounterInt64Observation) {
+			value := obs.Value
 			// Processed-slot lag drives score-based upstream selection on every
 			// path, not just the consensus slot-lag pre-filter. Solana slots
 			// carry no block timestamp, so pass 0 (EVM passes 0 here too, to
 			// avoid attributing a remote update's timestamp locally).
 			e.tracker.SetLatestBlockNumber(e.upstream, value, 0)
 		})
-		finalizedShared.OnValue(func(value int64, _ int64) {
+		finalizedShared.OnValue(func(obs data.CounterInt64Observation) {
+			value := obs.Value
 			e.tracker.SetFinalizedBlockNumber(e.upstream, value)
 		})
 

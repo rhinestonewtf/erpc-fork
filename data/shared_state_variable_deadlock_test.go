@@ -60,9 +60,9 @@ func TestConcurrentOperationsNoDeadlock(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for j := 0; j < 10; j++ {
-				result, _ := ctr.TryUpdateIfStale(ctx, 200*time.Millisecond, func(ctx context.Context) (int64, int64, error) {
+				result, _ := ctr.TryUpdateIfStale(ctx, 200*time.Millisecond, func(ctx context.Context) (CounterInt64Observation, error) {
 					current := ctr.value.Load()
-					return current + int64(id+1), 0, nil
+					return CounterInt64Observation{Value: current + int64(id+1)}, nil
 				})
 				if result > 0 {
 					completed.Add(1)

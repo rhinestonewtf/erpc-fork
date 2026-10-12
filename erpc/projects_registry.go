@@ -183,6 +183,13 @@ func (r *ProjectsRegistry) RegisterProject(prjCfg *common.ProjectConfig) (*Prepa
 				return err
 			}
 			ups.SetNetworkConfig(ntw.cfg)
+			// Fork RHI-8178: the poller writes every block it fetches into the
+			// network's JSON-RPC cache by hash (evm_state_poller_block_cache.go).
+			if sp, ok := ups.EvmStatePoller().(interface {
+				SetBlockCache(common.Network, common.CacheDAL)
+			}); ok {
+				sp.SetBlockCache(ntw, ntw.cacheDal)
+			}
 			return nil
 		},
 	)
