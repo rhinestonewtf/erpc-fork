@@ -87,12 +87,12 @@ func TestTryUpdateIfStale_UpdateFnBudgetExceeded(t *testing.T) {
 	ctr.value.Store(1)
 
 	start := time.Now()
-	val, err := ctr.TryUpdateIfStale(context.Background(), 1*time.Millisecond, func(ctx context.Context) (int64, int64, error) {
+	val, err := ctr.TryUpdateIfStale(context.Background(), 1*time.Millisecond, func(ctx context.Context) (CounterInt64Observation, error) {
 		select {
 		case <-time.After(200 * time.Millisecond):
-			return 999, 0, nil
+			return CounterInt64Observation{Value: 999}, nil
 		case <-ctx.Done():
-			return 0, 0, ctx.Err()
+			return CounterInt64Observation{}, ctx.Err()
 		}
 	})
 	elapsed := time.Since(start)
@@ -184,10 +184,10 @@ func TestTryUpdateIfStale_SlowFn_BackgroundPush(t *testing.T) {
 	ctr.value.Store(1)
 
 	start := time.Now()
-	val, err := ctr.TryUpdateIfStale(context.Background(), 1*time.Millisecond, func(ctx context.Context) (int64, int64, error) {
+	val, err := ctr.TryUpdateIfStale(context.Background(), 1*time.Millisecond, func(ctx context.Context) (CounterInt64Observation, error) {
 		// Runs longer than UpdateMaxWait; should continue and update in background
 		time.Sleep(120 * time.Millisecond)
-		return 77, 0, nil
+		return CounterInt64Observation{Value: 77}, nil
 	})
 	elapsed := time.Since(start)
 
@@ -263,9 +263,9 @@ func TestContinueAsyncRefresh_DoesNotLeakOnStuckWorker(t *testing.T) {
 	before := runtime.NumGoroutine()
 
 	// Foreground returns quickly via updateMaxWait; worker keeps running.
-	val, err := ctr.TryUpdateIfStale(context.Background(), 1*time.Millisecond, func(ctx context.Context) (int64, int64, error) {
+	val, err := ctr.TryUpdateIfStale(context.Background(), 1*time.Millisecond, func(ctx context.Context) (CounterInt64Observation, error) {
 		<-release
-		return 42, 0, nil
+		return CounterInt64Observation{Value: 42}, nil
 	})
 	assert.NoError(t, err)
 	assert.Equal(t, int64(1), val, "foreground should return stale value")

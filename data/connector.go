@@ -66,15 +66,18 @@ type KeyValuePair struct {
 // - UpdatedBy is best-effort (e.g., hostname/pod name) and is used for diagnostics only.
 // - Value can be 0 for valid cases like earliest block = genesis; use UpdatedAt to check initialization.
 //
-// BlockTimestamp is the on-chain timestamp (unix seconds) of the block Value names, when the
-// writer observed one; 0 means unknown. Optional on the wire: a writer that predates the field
-// leaves it unset and a reader that predates it ignores it, so the schema version is unchanged.
-// (Fork patch RHI-8244: lets a replica that receives a peer's head also sample block time.)
+// BlockTimestamp and BlockHash describe the block Value names, as the writer saw it: the
+// on-chain timestamp (unix seconds) and the 0x hash. Zero means unknown. Both are optional on
+// the wire: a writer that predates a field leaves it unset and a reader that predates it
+// ignores it, so the schema version is unchanged. (Fork patches RHI-8244 and RHI-8178: a
+// replica that receives a peer's head also gets what it needs to sample block time and to
+// find the block in the cache by hash.)
 type CounterInt64State struct {
 	Value          int64  `json:"v"`
 	UpdatedAt      int64  `json:"t"`
 	UpdatedBy      string `json:"b,omitempty"`
 	BlockTimestamp int64  `json:"bt,omitempty"`
+	BlockHash      string `json:"bh,omitempty"`
 }
 
 type Connector interface {
