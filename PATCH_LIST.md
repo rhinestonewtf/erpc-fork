@@ -46,6 +46,9 @@ grep -q "common.CorroboratedHead(" erpc/networks.go && echo OK
 grep -q "pollFinalizedBlockNumberScheduled" architecture/evm/evm_state_poller.go && echo OK
 grep -q "BlockTimestamp" data/connector.go && echo OK
 grep -q "latestBlockShared.TryUpdateIfStale(" architecture/evm/evm_state_poller.go && echo OK
+grep -q "cacheBlockByHash(" architecture/evm/evm_state_poller.go && echo OK
+grep -q "hub.hashFor(" erpc/block_stream.go && echo OK
+grep -q "BlockHash" data/connector.go && echo OK
 test -f erpc-prod.yaml && echo OK
 test -f buildspec-amd64.yml && echo OK
 test -f buildspec-arm64.yml && echo OK
@@ -74,7 +77,8 @@ around it.
 | `ade471ae` fix(ratelimiter): parse rediss:// URI for the Redis store (RHI-6529, #9) | `upstream/ratelimiter_redis_target.go`, `upstream/ratelimiter_redis_target_test.go`, `upstream/ratelimiter_registry.go` | `resolveRateLimiterRedisTarget` called in `ratelimiter_registry.go` |
 | `a503823d` fix(health): serve the corroborated head within lag noise, capped (RHI-8079, #12, #13) | `common/head_noise_tolerance.go` (+ `_test`), call sites in `health/tracker.go` (head + block-time sample) and `erpc/networks.go`; new tests in `health/`, `erpc/`, `internal/policy/`; updated expectations in `health/tracker_*_test.go`, `erpc/networks_test.go`, `erpc/networks_served_tip_test.go`, `erpc/networks_selection_policy_realpoll_test.go`; `docs/pages/reference/evm/block-tracking.mdx` | `common.CorroboratedHead(` called in both `health/tracker.go` and `erpc/networks.go` |
 | `61db4a8e` feat(evm): debounce the finalized poll on finality period, not block time (RHI-8113, #14) | `architecture/evm/evm_state_poller_finalized_debounce.go` (+ `_test`), call sites in `architecture/evm/evm_state_poller.go`, `docs/pages/reference/evm/block-tracking.mdx` | `pollFinalizedBlockNumberScheduled` called in `evm_state_poller.go` |
-| `0fcffa82` feat(data): carry the block timestamp through shared state; latest poll back on the shared clock (RHI-8244) | `data/shared_state_block_timestamp.go` (+ `_test`), `architecture/evm/evm_state_poller_shared_clock_test.go`; signature changes in `data/connector.go`, `data/shared_state_variable.go`, call sites in `architecture/evm/evm_state_poller.go`, `architecture/svm/svm_state_poller.go`, `upstream/upstream.go`; `docs/pages/reference/evm/block-tracking.mdx` | `BlockTimestamp` in `data/connector.go`, and `latestBlockShared.TryUpdateIfStale(` (not `IfLocallyStale`) in `evm_state_poller.go` |
+| `0fcffa82` feat(data): carry the block timestamp through shared state; latest poll back on the shared clock (RHI-8244) | `data/shared_state_observation.go` (+ `_test`; was `shared_state_block_timestamp.go` until RHI-8178 generalised it), `architecture/evm/evm_state_poller_shared_clock_test.go`; signature changes in `data/connector.go`, `data/shared_state_variable.go`, call sites in `architecture/evm/evm_state_poller.go`, `architecture/svm/svm_state_poller.go`, `upstream/upstream.go`; `docs/pages/reference/evm/block-tracking.mdx` | `BlockTimestamp` in `data/connector.go`, and `latestBlockShared.TryUpdateIfStale(` (not `IfLocallyStale`) in `evm_state_poller.go` |
+| `39059069` feat(evm): cache the poller's block by hash and stream it by hash (RHI-8178) | `architecture/evm/evm_state_poller_block_cache.go` (+ `_test`), `data/shared_state_observation.go` (+ `_test`), hub + subscriber loop in `erpc/block_stream.go` (+ `_test`); call sites in `architecture/evm/evm_state_poller.go` (`fetchBlock`, `OnLatestBlock`), `erpc/projects_registry.go`, `data/connector.go`, `data/shared_state_variable.go`; signature adapters in `architecture/svm/svm_state_poller.go`, `upstream/upstream.go`; `docs/pages/reference/evm/block-tracking.mdx` | `cacheBlockByHash(` called in `evm_state_poller.go`, `hub.hashFor(` used in `erpc/block_stream.go`, `BlockHash` in `data/connector.go` |
 
 **RHI-6277 — gas-limit rejections are terminal.** A rejection of the transaction's gas
 limit is classified `ErrEndpointExecutionException` and **not** marked retryable toward
@@ -219,6 +223,33 @@ upstream's `TryUpdateIfLocallyStale` line compiles and silently restores the per
 which is what the probe and `TestPollLatestBlockNumberUsesTheSharedClock` catch.
 `TestBlockTimestamp_ReceivingReplicaSamplesBlockTime` fails if the timestamp stops reaching
 a receiving replica's tracker.
+
+**RHI-8178 — the poller's block is cached by hash and streamed by hash.** The state
+poller fetches a full block (`eth_getBlockByNumber`, hashes-only) every tick and, before
+this patch, kept only the number: its request goes straight to the upstream, so nothing it
+observes ever reached the cache, and the `StreamBlocks` subscriber loop fetched the same
+block again by number. On a 1-block/s chain that duplicate was ~20 CU/s per chain, 70–85%
+of chain-indexer's idle overhead. The cache is the transport: `fetchBlock` writes the block
+into the network's JSON-RPC cache as the response to `eth_getBlockByHash(hash, false)`,
+synchronously, before the head is published; the shared head record carries the hash next
+to the RHI-8244 timestamp (`CounterInt64Observation` replaces the `(value, timestamp)`
+pair, and the counter fills in or supersedes the block fields of a head it already holds);
+the hub records number → hash and the subscriber loop fetches a known block by hash through
+the normal request path — a shared-cache hit on any replica — and by number only for gaps.
+Any by-hash miss, null or error, degrades to the by-number fetch, so the patch is
+behaviour-neutral until the environment has an `unfinalized` cache policy for
+`eth_getBlockByHash` (infra config; prod caches by hash at `finalized` only). A by-hash
+entry is content-addressed, so that policy's TTL is a memory bound, not a correctness knob.
+
+*Upstreamable:* yes, together with RHI-8244, once soaked.
+
+*Rebase risk:* medium, for the same reason as RHI-8244 (the counter file is upstream-active).
+The call sites that die quietly are the one line in `fetchBlock` that calls
+`cacheBlockByHash` and the `hub.hashFor` lookup in the subscriber loop: either can be
+dropped and everything compiles and streams as before, which is what the probes and
+`TestPollLatestBlock_CachesTheBlockByHashBeforePublishingTheHead` /
+`TestBlockStreamHub_RecordsObservedHashes` catch. The registry wiring (`SetBlockCache` next
+to `SetNetworkConfig`) is the third; without it the poller has no cache and writes nothing.
 
 **Base-10 quantity tolerance.** Some upstreams return EVM quantities as base-10 strings
 instead of `0x`-prefixed hex, which broke upstream health tracking. `HexToUint64` /
