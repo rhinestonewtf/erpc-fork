@@ -65,10 +65,16 @@ type KeyValuePair struct {
 // - UpdatedAt is unix milliseconds; UpdatedAt <= 0 indicates uninitialized state.
 // - UpdatedBy is best-effort (e.g., hostname/pod name) and is used for diagnostics only.
 // - Value can be 0 for valid cases like earliest block = genesis; use UpdatedAt to check initialization.
+//
+// BlockTimestamp is the on-chain timestamp (unix seconds) of the block Value names, when the
+// writer observed one; 0 means unknown. Optional on the wire: a writer that predates the field
+// leaves it unset and a reader that predates it ignores it, so the schema version is unchanged.
+// (Fork patch RHI-8244: lets a replica that receives a peer's head also sample block time.)
 type CounterInt64State struct {
-	Value     int64  `json:"v"`
-	UpdatedAt int64  `json:"t"`
-	UpdatedBy string `json:"b,omitempty"`
+	Value          int64  `json:"v"`
+	UpdatedAt      int64  `json:"t"`
+	UpdatedBy      string `json:"b,omitempty"`
+	BlockTimestamp int64  `json:"bt,omitempty"`
 }
 
 type Connector interface {

@@ -389,6 +389,8 @@ func TestCovPoller_PollLatest_MajorMoveChainIdGate(t *testing.T) {
 		p, up, ctx := covPollerNew(t, "cov-latest-gate-fwd", covPollerBlocks(5_000_000, 90))
 		up.chainId = "999"
 		p.latestBlockShared.TryUpdate(ctx, 1000)
+		covPollerFastDebounce(p) // fork RHI-8244: TryUpdate marks the shared clock fresh; age it
+		time.Sleep(5 * time.Millisecond)
 
 		_, err := p.PollLatestBlockNumber(ctx)
 		require.NoError(t, err)
@@ -401,6 +403,8 @@ func TestCovPoller_PollLatest_MajorMoveChainIdGate(t *testing.T) {
 		p, up, ctx := covPollerNew(t, "cov-latest-gate-back", covPollerBlocks(1000, 90))
 		up.chainId = "999"
 		p.latestBlockShared.TryUpdate(ctx, 5_000_000)
+		covPollerFastDebounce(p) // fork RHI-8244: TryUpdate marks the shared clock fresh; age it
+		time.Sleep(5 * time.Millisecond)
 
 		_, err := p.PollLatestBlockNumber(ctx)
 		require.NoError(t, err)
@@ -411,6 +415,8 @@ func TestCovPoller_PollLatest_MajorMoveChainIdGate(t *testing.T) {
 	t.Run("verified major jump is accepted", func(t *testing.T) {
 		p, up, ctx := covPollerNew(t, "cov-latest-gate-ok", covPollerBlocks(5_000_000, 90))
 		p.latestBlockShared.TryUpdate(ctx, 1000)
+		covPollerFastDebounce(p) // fork RHI-8244: TryUpdate marks the shared clock fresh; age it
+		time.Sleep(5 * time.Millisecond)
 
 		v, err := p.PollLatestBlockNumber(ctx)
 		require.NoError(t, err)
@@ -660,6 +666,8 @@ func TestCovPoller_OnLatestBlock_FiresForEveryAdvance(t *testing.T) {
 	p.SuggestLatestBlock(200)
 	assert.Equal(t, int64(200), <-got)
 
+	covPollerFastDebounce(p) // fork RHI-8244: the suggestion marks the shared clock fresh; age it
+	time.Sleep(5 * time.Millisecond)
 	_, err := p.PollLatestBlockNumber(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, int64(300), <-got, "polled advances fire the same callback")

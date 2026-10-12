@@ -1581,7 +1581,7 @@ func (u *Upstream) operatorCordonVar() data.CounterInt64SharedVariable {
 	u.operatorCordonOnce.Do(func() {
 		key := data.CounterValueSchemaVersion + "/operatorCordon/" + u.ProjectId + "/" + common.UniqueUpstreamKey(u)
 		v := u.sharedStateRegistry.GetCounterInt64(key, 0)
-		v.OnValue(func(cordonedAtMs int64) {
+		v.OnValue(func(cordonedAtMs int64, _ int64) {
 			reason := "operator cordon (set on another replica)"
 			if r, ok := u.operatorCordonReason.Load().(string); ok && r != "" {
 				reason = r

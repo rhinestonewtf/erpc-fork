@@ -55,10 +55,10 @@ func TestIntegrationTimeoutFlow(t *testing.T) {
 		start := time.Now()
 
 		// First update - should be fast with no contention
-		value, err := counter.TryUpdateIfStale(pollCtx, 5*time.Second, func(ctx context.Context) (int64, error) {
+		value, err := counter.TryUpdateIfStale(pollCtx, 5*time.Second, func(ctx context.Context) (int64, int64, error) {
 			// Simulate block fetch
 			time.Sleep(100 * time.Millisecond)
-			return 42, nil
+			return 42, 0, nil
 		})
 
 		elapsed := time.Since(start)
@@ -69,9 +69,9 @@ func TestIntegrationTimeoutFlow(t *testing.T) {
 
 		// Second update within debounce - should return cached
 		start2 := time.Now()
-		value2, err2 := counter.TryUpdateIfStale(pollCtx, 5*time.Second, func(ctx context.Context) (int64, error) {
+		value2, err2 := counter.TryUpdateIfStale(pollCtx, 5*time.Second, func(ctx context.Context) (int64, int64, error) {
 			t.Fatal("Should not fetch when value is fresh")
-			return 0, nil
+			return 0, 0, nil
 		})
 		elapsed2 := time.Since(start2)
 
@@ -130,8 +130,8 @@ func TestIntegrationTimeoutFlow(t *testing.T) {
 		defer pollCancel()
 
 		start := time.Now()
-		value, err := counter.TryUpdateIfStale(pollCtx, 100*time.Millisecond, func(ctx context.Context) (int64, error) {
-			return 123, nil
+		value, err := counter.TryUpdateIfStale(pollCtx, 100*time.Millisecond, func(ctx context.Context) (int64, int64, error) {
+			return 123, 0, nil
 		})
 		elapsed := time.Since(start)
 
@@ -219,13 +219,13 @@ func TestConcurrentPollers(t *testing.T) {
 			pollCtx, pollCancel := context.WithTimeout(ctx, pollTimeout)
 			defer pollCancel()
 
-			value, err := counter.TryUpdateIfStale(pollCtx, 100*time.Millisecond, func(ctx context.Context) (int64, error) {
+			value, err := counter.TryUpdateIfStale(pollCtx, 100*time.Millisecond, func(ctx context.Context) (int64, int64, error) {
 				// Only one should actually fetch
 				count := fetchCount.Add(1)
 				newValue := currentValue.Add(1)
 				t.Logf("Poller %d fetching, count=%d, value=%d", id, count, newValue)
 				time.Sleep(200 * time.Millisecond) // Simulate fetch time
-				return newValue, nil
+				return newValue, 0, nil
 			})
 
 			assert.NoError(t, err)

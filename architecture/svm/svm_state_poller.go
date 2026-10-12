@@ -219,7 +219,7 @@ func NewSvmStatePoller(
 	// by refreshFirstAvailableSlot's not-stale fast path — but ONLY when no
 	// local refresh is still pending a real observation (see
 	// firstAvailableSlotPending).
-	firstAvailableShared.OnValue(func(v int64) {
+	firstAvailableShared.OnValue(func(v int64, _ int64) { // fork RHI-8244: no block timestamp for a slot floor
 		e.firstAvailableSlotPending.Store(false)
 		e.firstAvailableSlotKnown.Store(true)
 		e.gauge(telemetry.MetricUpstreamSvmFirstAvailableSlot).Set(float64(v))
@@ -232,14 +232,14 @@ func NewSvmStatePoller(
 	// counter — and stays silent when the counter rejects a lower slot, so the
 	// tracker can never be fed a slot the counter itself refused.
 	if tracker != nil {
-		latestShared.OnValue(func(value int64) {
+		latestShared.OnValue(func(value int64, _ int64) {
 			// Processed-slot lag drives score-based upstream selection on every
 			// path, not just the consensus slot-lag pre-filter. Solana slots
 			// carry no block timestamp, so pass 0 (EVM passes 0 here too, to
 			// avoid attributing a remote update's timestamp locally).
 			e.tracker.SetLatestBlockNumber(e.upstream, value, 0)
 		})
-		finalizedShared.OnValue(func(value int64) {
+		finalizedShared.OnValue(func(value int64, _ int64) {
 			e.tracker.SetFinalizedBlockNumber(e.upstream, value)
 		})
 
@@ -614,7 +614,7 @@ func (e *SvmStatePoller) refreshFirstAvailableSlot(ctx context.Context) {
 	}
 	wasStale := e.firstAvailableSlotShared.IsStale(staleness)
 	slot, err := e.firstAvailableSlotShared.TryUpdateIfStale(ctx, staleness,
-		func(ctx context.Context) (slot int64, err error) {
+		func(ctx context.Context) (slot int64, _ int64, err error) { // fork RHI-8244: no block timestamp for a slot floor
 			// The shared counter may run this on its own goroutine, outside
 			// Poll's recoverPanic; a panicking transport must not crash the process.
 			defer func() {
@@ -629,10 +629,10 @@ func (e *SvmStatePoller) refreshFirstAvailableSlot(ctx context.Context) {
 				// method, and null/empty results. Returning the error leaves
 				// the previous value and the known flag untouched, so that
 				// upstream is never excluded.
-				return 0, err
+				return 0, 0, err
 			}
 			if slot < 0 {
-				return 0, fmt.Errorf("negative first available slot %d", slot)
+				return 0, 0, fmt.Errorf("negative first available slot %d", slot)
 			}
 			// A node's floor cannot exceed its own head. Validating that here
 			// is what stops one buggy or hostile upstream from advertising a
@@ -640,12 +640,12 @@ func (e *SvmStatePoller) refreshFirstAvailableSlot(ctx context.Context) {
 			// read. When LatestSlot is still 0 the check is skipped, so a cold
 			// poller cannot reject a legitimate sample.
 			if latest := e.LatestSlot(); latest > 0 && slot > latest {
-				return 0, fmt.Errorf("first available slot %d is above own latest slot %d", slot, latest)
+				return 0, 0, fmt.Errorf("first available slot %d is above own latest slot %d", slot, latest)
 			}
 			e.firstAvailableSlotPending.Store(false)
 			e.firstAvailableSlotKnown.Store(true)
 			e.gauge(telemetry.MetricUpstreamSvmFirstAvailableSlot).Set(float64(slot))
-			return slot, nil
+			return slot, 0, nil
 		})
 	if err != nil {
 		// A failed fetch still marks the counter fresh (markFreshAttempt), so
