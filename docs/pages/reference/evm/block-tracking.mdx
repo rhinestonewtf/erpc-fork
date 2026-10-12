@@ -17,7 +17,7 @@ Every upstream sees the chain at a slightly different block. Without coordinatio
 - Consensus-cluster served tip that only advances when the majority of upstreams agree — no phantom future blocks, no stale tips
 - Optional per-group guarantee so the advertised tip stays servable by the upstreams your consensus policy requires
 - Per-upstream lag gauges that feed selection policies so slow nodes are deprioritized before requests reach them
-- Redis-backed counters share heads across replicas; each replica samples latest-block timestamps on its own debounce schedule.
+- Works across pods: Redis-backed shared counters carry the head and its block timestamp, so only one replica polls per debounce window and every replica still samples block time (fork patch RHI-8244)
 
 ## Quick taste
 
@@ -94,7 +94,7 @@ https://docs.erpc.cloud/reference/evm/block-tracking.llms.txt`}
 
 Each upstream gets its own `EvmStatePoller` background goroutine. On each tick of `statePollerInterval` (default 30 s), three concurrent goroutines fetch the latest block, finalized block, and syncing state. A synchronous `Poll()` runs once at bootstrap time to seed the upstream before any request traffic arrives.
 
-Remote head updates do not postpone local latest-block sampling. A local fetch can attach a missing timestamp to the same block already received from a peer. The block-time estimator accepts that matched observation without advancing the head again. Latest-block polling cost scales with replica count.
+The shared head record carries the block timestamp next to the block number, and the counter hands both to its listeners, so a replica that receives a peer's head samples block time from the peer's observation. The `latest` poll therefore debounces on the shared staleness clock: one fetch per cluster per window, and polling cost does not scale with replica count. A head that arrives without a timestamp (request-path suggestion, or a peer on an older wire format) is adopted as timestamp-unknown; when the same head later arrives with one, the counter fills it in and the block-time estimator accepts that matched observation without advancing the head again. (Fork patch RHI-8244; upstream #1208 instead polls on a replica-local clock so each replica samples its own fetch.)
 
 **Routing the `safe` tag.** On op-stack chains, `safe` is node-relative because each verifier chooses its own L1 confirmation depth. If providers in one pool use different depths, they can honestly return different blocks for the same tag. Set `evm.safeBlockSource` to an upstream id/tag selector when one pool should define that answer:
 
@@ -322,7 +322,7 @@ The result is monotonically clamped via a cross-pod shared counter so the served
 10. **`updateRate` goroutine is NOT restarted on config hot-reload.** Only a process restart picks up a changed `updateRate` for `earliestBlockPlus` bounds. Setting `updateRate` alongside `latestBlockMinus` produces a validation warning (not an error); the value is silently ignored at runtime.
 11. **`ErrFinalizedBlockUnavailable` is retryable.** It carries no explicit opt-out flag, so `IsRetryableTowardNetwork` returns true. On the wire it maps to HTTP 200 with JSON-RPC error code `-32603`.
 12. **`erpc_network_served_tip_lag_blocks` reports 0 during a total outage.** When all upstreams return 0 or blocks below the clamp, `MaxEligible = 0` and `lag = MaxEligible − served < 0` is clamped to 0. A lag of 0 with a flat `served_tip_block_number` indicates total outage, not healthy operation.
-13. **`OnValue` callback passes `blockTimestamp=0` for cross-pod replications.** Only the replica that actually fetches feeds the EMA with a real timestamp; replicas receiving shared-counter updates use `blockTimestamp=0`, so only one pod per network feeds the EMA per debounce window.
+13. **`OnValue` passes the block timestamp that travelled with the head, 0 when none did.** A replica receiving a shared-counter update feeds its own EMA from the peer's timestamp, so every pod has a warmed estimate while only one pod per network fetches per debounce window. A `0` means the head was learned without a timestamp (`SuggestLatestBlock`, or a peer that predates the field); the tracker treats it as unknown and the EMA waits for the next timestamped observation (fork patch RHI-8244).
 14. **`ErrFinalizedBlockUnavailable` never fires if only `latestBlock == 0`.** The error requires BOTH counters to be 0. If the upstream supports `eth_getBlockByNumber("latest")` but not `"finalized"`, `IsBlockFinalized` falls back to `latestBlock − FallbackFinalityDepth` instead of returning the error.
 15. **`SuggestFinalizedBlock` may drop updates under load.** It uses `TryLock`; if an update is already in progress the suggestion is discarded. Finalized block updates may lag under high request volume.
 16. **`SuggestLatestBlock` monotonic within a process but not across pod restarts.** It calls `TryUpdate` which the shared counter rejects if the value is ≤ current. Across pod restarts the shared counter (Redis) retains the last value, so a restarted upstream reporting a lower block number after a reorg is silently ignored for up to 1024 blocks of rollback.

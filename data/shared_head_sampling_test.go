@@ -20,14 +20,14 @@ func TestSharedHeadEMASmoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := &counterInt64{registry: &sharedStateRegistry{appCtx: ctx, logger: &logger, connector: connector, fallbackTimeout: time.Second, updateMaxWait: time.Second, lockMaxWait: time.Second, lockTtl: time.Second}}
-	c.OnValue(func(n int64) { tr.SetLatestBlockNumber(up, n, 0) })
+	c.OnValue(func(n int64, ts int64) { tr.SetLatestBlockNumber(up, n, ts) })
 	for n := int64(100); n < 110; n++ {
 		c.processNewState("peer", CounterInt64State{Value: n, UpdatedAt: time.Now().UnixMilli() + n, UpdatedBy: "peer"})
 		calls := 0
-		_, err := c.TryUpdateIfLocallyStale(ctx, -time.Second, func(context.Context) (int64, error) {
+		_, err := c.TryUpdateIfLocallyStale(ctx, -time.Second, func(context.Context) (int64, int64, error) {
 			calls++
 			tr.SetLatestBlockNumber(up, n, 1800000000+2*(n-100))
-			return n, nil
+			return n, 0, nil
 		})
 		if err != nil || calls != 1 {
 			t.Fatalf("local sample suppressed: calls=%d err=%v", calls, err)
@@ -38,7 +38,7 @@ func TestSharedHeadEMASmoke(t *testing.T) {
 		t.Fatalf("want 2s, got %s", got)
 	}
 	calls := 0
-	_, err = c.TryUpdateIfLocallyStale(ctx, time.Hour, func(context.Context) (int64, error) { calls++; return 110, nil })
+	_, err = c.TryUpdateIfLocallyStale(ctx, time.Hour, func(context.Context) (int64, int64, error) { calls++; return 110, 0, nil })
 	if err != nil || calls != 0 {
 		t.Fatalf("local debounce failed: calls=%d err=%v", calls, err)
 	}
