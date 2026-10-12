@@ -20,10 +20,15 @@ type SharedVariable interface {
 type CounterInt64SharedVariable interface {
 	SharedVariable
 	GetValue() int64
-	TryUpdateIfStale(ctx context.Context, staleness time.Duration, getNewValue func(ctx context.Context) (int64, error)) (int64, error)
-	TryUpdateIfLocallyStale(ctx context.Context, staleness time.Duration, getNewValue func(ctx context.Context) (int64, error)) (int64, error)
+	// getNewValue returns the fetched value and, when it observed one, the on-chain
+	// timestamp of the block that value names (0 when unknown). The timestamp
+	// travels with the value through shared state and into OnValue callbacks.
+	TryUpdateIfStale(ctx context.Context, staleness time.Duration, getNewValue func(ctx context.Context) (int64, int64, error)) (int64, error)
+	TryUpdateIfLocallyStale(ctx context.Context, staleness time.Duration, getNewValue func(ctx context.Context) (int64, int64, error)) (int64, error)
 	TryUpdate(ctx context.Context, newValue int64) int64
-	OnValue(callback func(int64))
+	// OnValue fires with the accepted value and its block timestamp (0 when no
+	// writer observed one), whether the value was fetched here or by a peer.
+	OnValue(callback func(value int64, blockTimestamp int64))
 	OnLargeRollback(callback func(currentVal, newVal int64))
 }
 
@@ -106,8 +111,9 @@ type counterInt64 struct {
 	registry               *sharedStateRegistry
 	key                    string
 	value                  atomic.Int64
+	blockTimestamp         atomic.Int64 // on-chain timestamp attached to value, 0 when unknown (RHI-8244)
 	updateMu               sync.Mutex
-	valueCallbacks         []func(int64)
+	valueCallbacks         []func(value int64, blockTimestamp int64)
 	ignoreRollbackOf       int64
 	largeRollbackCallbacks []func(localVal, newVal int64)
 	callbackMu             sync.RWMutex
@@ -151,7 +157,12 @@ func (c *counterInt64) processNewState(source string, st CounterInt64State) bool
 		if st.UpdatedAt <= currentTs {
 			// Reject stale/out-of-order states by UpdatedAt ordering.
 			// This provides idempotency and prevents stale remote values from overriding fresh local detections.
-			return false
+			//
+			// Fork RHI-8244: the ordering gate protects the VALUE. A block's
+			// timestamp is a chain fact, so an older record for the head we
+			// already hold can still fill in a timestamp we lack (a head learned
+			// from SuggestLatestBlock, then the fetching peer's record for it).
+			return c.adoptBlockTimestamp(st.Value, st.BlockTimestamp)
 		}
 	}
 
@@ -177,13 +188,14 @@ func (c *counterInt64) processNewState(source string, st CounterInt64State) bool
 				}
 			}
 		}
-		return false
+		return c.adoptBlockTimestamp(newVal, st.BlockTimestamp)
 	}
 
 	if newVal > currentValue {
 		// Forward progress: always accept
 		for {
 			if c.value.CompareAndSwap(currentValue, newVal) {
+				c.blockTimestamp.Store(st.BlockTimestamp)
 				// Update timestamp AFTER accepting the value (for remote updates)
 				if isRemoteUpdate {
 					c.updateUpdatedAtMs(st.UpdatedAt)
@@ -195,7 +207,7 @@ func (c *counterInt64) processNewState(source string, st CounterInt64State) bool
 					Int64("to", newVal).
 					Int64("updatedAt", st.UpdatedAt).
 					Msg("counter value increased (remote)")
-				c.triggerValueCallback(newVal)
+				c.triggerValueCallback(newVal, st.BlockTimestamp)
 				return true
 			}
 			currentValue = c.value.Load()
@@ -260,6 +272,7 @@ func (c *counterInt64) processNewState(source string, st CounterInt64State) bool
 	// Large rollback exceeds threshold - apply it and trigger callback
 	for {
 		if c.value.CompareAndSwap(currentValue, newVal) {
+			c.blockTimestamp.Store(st.BlockTimestamp)
 			// Update timestamp AFTER accepting the value (for remote updates)
 			if isRemoteUpdate {
 				c.updateUpdatedAtMs(st.UpdatedAt)
@@ -272,7 +285,7 @@ func (c *counterInt64) processNewState(source string, st CounterInt64State) bool
 				Int64("gap", gap).
 				Int64("updatedAt", st.UpdatedAt).
 				Msg("large rollback applied (remote)")
-			c.triggerValueCallback(newVal)
+			c.triggerValueCallback(newVal, st.BlockTimestamp)
 
 			// Trigger callback for observability
 			c.callbackMu.RLock()
@@ -299,18 +312,23 @@ func (c *counterInt64) processNewState(source string, st CounterInt64State) bool
 // - ignoreRollbackOf > 0: Ignore small rollbacks (noise from lagging RPCs), trigger callback for large ones
 //
 // This is different from processNewState which uses timestamp ordering for remote reconciliation.
-func (c *counterInt64) processNewValue(source string, newVal int64) bool {
+//
+// blockTimestamp is the on-chain timestamp observed with newVal, 0 when the
+// caller has none (TryUpdate). It is stored beside the value on every accepted
+// change; for an equal value it can only fill in a timestamp we lack.
+func (c *counterInt64) processNewValue(source string, newVal int64, blockTimestamp int64) bool {
 	currentValue := c.value.Load()
 	if newVal == currentValue {
 		// Value is the same, but mark as fresh to prevent repeated refresh attempts
 		c.allocateUpdatedAtMs()
-		return false
+		return c.adoptBlockTimestamp(newVal, blockTimestamp)
 	}
 
 	if newVal > currentValue {
 		// Forward progress: always accept
 		for {
 			if c.value.CompareAndSwap(currentValue, newVal) {
+				c.blockTimestamp.Store(blockTimestamp)
 				c.allocateUpdatedAtMs() // Mark as fresh
 				c.registry.logger.Trace().
 					Str("source", source).
@@ -318,7 +336,7 @@ func (c *counterInt64) processNewValue(source string, newVal int64) bool {
 					Int64("from", currentValue).
 					Int64("to", newVal).
 					Msg("counter value increased (local)")
-				c.triggerValueCallback(newVal)
+				c.triggerValueCallback(newVal, blockTimestamp)
 				return true
 			}
 			currentValue = c.value.Load()
@@ -361,6 +379,7 @@ func (c *counterInt64) processNewValue(source string, newVal int64) bool {
 	// Large rollback exceeds threshold - apply it and trigger callback
 	for {
 		if c.value.CompareAndSwap(currentValue, newVal) {
+			c.blockTimestamp.Store(blockTimestamp)
 			c.allocateUpdatedAtMs() // Mark as fresh
 			c.registry.logger.Trace().
 				Str("source", source).
@@ -369,7 +388,7 @@ func (c *counterInt64) processNewValue(source string, newVal int64) bool {
 				Int64("to", newVal).
 				Int64("gap", gap).
 				Msg("large rollback applied (local)")
-			c.triggerValueCallback(newVal)
+			c.triggerValueCallback(newVal, blockTimestamp)
 
 			// Trigger callback for observability
 			c.callbackMu.RLock()
@@ -390,15 +409,15 @@ func (c *counterInt64) processNewValue(source string, newVal int64) bool {
 	}
 }
 
-func (c *counterInt64) triggerValueCallback(val int64) {
+func (c *counterInt64) triggerValueCallback(val int64, blockTimestamp int64) {
 	c.callbackMu.RLock()
-	callbacks := make([]func(int64), len(c.valueCallbacks))
+	callbacks := make([]func(value int64, blockTimestamp int64), len(c.valueCallbacks))
 	copy(callbacks, c.valueCallbacks)
 	c.callbackMu.RUnlock()
 
 	for _, cb := range callbacks {
 		if cb != nil {
-			cb(val)
+			cb(val, blockTimestamp)
 		}
 	}
 }
@@ -418,7 +437,7 @@ func (c *counterInt64) TryUpdate(ctx context.Context, newValue int64) int64 {
 	// IMPORTANT: TryUpdate must never wait on updateMu.
 	// updateMu exists to coordinate expensive refresh execution in TryUpdateIfStale (thundering herd control),
 	// but local counter advancement must remain fast even if a refresh is in-flight.
-	updated := c.processNewValue(UpdateSourceTryUpdate, newValue)
+	updated := c.processNewValue(UpdateSourceTryUpdate, newValue, 0)
 
 	// Schedule background push when value was actually updated (increase OR decrease).
 	// With unified semantics, all value changes are propagated to remote.
@@ -429,15 +448,15 @@ func (c *counterInt64) TryUpdate(ctx context.Context, newValue int64) int64 {
 	return c.value.Load()
 }
 
-func (c *counterInt64) TryUpdateIfStale(ctx context.Context, staleness time.Duration, executeNewValueFn func(ctx context.Context) (int64, error)) (int64, error) {
+func (c *counterInt64) TryUpdateIfStale(ctx context.Context, staleness time.Duration, executeNewValueFn func(ctx context.Context) (int64, int64, error)) (int64, error) {
 	return c.tryUpdateIfStale(ctx, staleness, executeNewValueFn, false)
 }
 
-func (c *counterInt64) TryUpdateIfLocallyStale(ctx context.Context, staleness time.Duration, executeNewValueFn func(ctx context.Context) (int64, error)) (int64, error) {
+func (c *counterInt64) TryUpdateIfLocallyStale(ctx context.Context, staleness time.Duration, executeNewValueFn func(ctx context.Context) (int64, int64, error)) (int64, error) {
 	return c.tryUpdateIfStale(ctx, staleness, executeNewValueFn, true)
 }
 
-func (c *counterInt64) tryUpdateIfStale(ctx context.Context, staleness time.Duration, executeNewValueFn func(ctx context.Context) (int64, error), local bool) (int64, error) {
+func (c *counterInt64) tryUpdateIfStale(ctx context.Context, staleness time.Duration, executeNewValueFn func(ctx context.Context) (int64, int64, error), local bool) (int64, error) {
 	freshness := &c.baseSharedVariable
 	if local {
 		freshness = &c.localRefresh
@@ -488,7 +507,7 @@ func (c *counterInt64) tryUpdateIfStale(ctx context.Context, staleness time.Dura
 				attribute.Int64("timeout_ms", c.registry.fallbackTimeout.Milliseconds()),
 			),
 		)
-		value, err := executeNewValueFn(fnCtx)
+		value, blockTimestamp, err := executeNewValueFn(fnCtx)
 		if err != nil {
 			fnSpan.SetAttributes(attribute.String("error", err.Error()))
 		} else {
@@ -496,7 +515,7 @@ func (c *counterInt64) tryUpdateIfStale(ctx context.Context, staleness time.Dura
 		}
 		fnSpan.End()
 
-		resultCh <- refreshResult{val: value, err: err}
+		resultCh <- refreshResult{val: value, blockTimestamp: blockTimestamp, err: err}
 	}()
 
 	timer := time.NewTimer(c.registry.updateMaxWait)
@@ -523,7 +542,7 @@ func (c *counterInt64) tryUpdateIfStale(ctx context.Context, staleness time.Dura
 	}
 }
 
-func (c *counterInt64) OnValue(cb func(int64)) {
+func (c *counterInt64) OnValue(cb func(value int64, blockTimestamp int64)) {
 	c.callbackMu.Lock()
 	defer c.callbackMu.Unlock()
 	c.valueCallbacks = append(c.valueCallbacks, cb)
@@ -540,8 +559,9 @@ func (c *counterInt64) markFreshAttempt() {
 }
 
 type refreshResult struct {
-	val int64
-	err error
+	val            int64
+	blockTimestamp int64
+	err            error
 }
 
 func (c *counterInt64) applyRefreshResult(initialVal int64, r refreshResult) (int64, error) {
@@ -549,7 +569,7 @@ func (c *counterInt64) applyRefreshResult(initialVal int64, r refreshResult) (in
 		c.markFreshAttempt()
 		return initialVal, r.err
 	}
-	updated := c.processNewValue(UpdateSourceTryUpdateIfStale, r.val)
+	updated := c.processNewValue(UpdateSourceTryUpdateIfStale, r.val, r.blockTimestamp)
 	if updated {
 		c.scheduleBackgroundPushCurrent()
 	}
@@ -617,9 +637,10 @@ func (c *counterInt64) tryAcquireLock(ctx context.Context) func() {
 
 func (c *counterInt64) localState() CounterInt64State {
 	return CounterInt64State{
-		Value:     c.value.Load(),
-		UpdatedAt: c.updatedAtMs(),
-		UpdatedBy: c.registry.instanceId,
+		Value:          c.value.Load(),
+		UpdatedAt:      c.updatedAtMs(),
+		UpdatedBy:      c.registry.instanceId,
+		BlockTimestamp: c.blockTimestamp.Load(),
 	}
 }
 
