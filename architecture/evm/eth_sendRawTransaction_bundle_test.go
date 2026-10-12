@@ -137,6 +137,31 @@ func (n *bundleTestNetwork) nonceReads() int {
 	return reads
 }
 
+// holdInKeepAlive puts hashes in keep-alive as if a relay had accepted them
+// earlier, without starting its loop.
+func (n *bundleTestNetwork) holdInKeepAlive(hashes ...string) {
+	k := keepAliveFor(n)
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for _, h := range hashes {
+		k.kept[h] = &keptTx{
+			tx:       &sendRawTx{hash: h},
+			accepted: map[int64]struct{}{},
+			inflight: map[int64]struct{}{},
+			deadline: time.Now().Add(time.Hour),
+		}
+	}
+}
+
+// otherHashes returns count distinct hashes, none of them the fixture's.
+func otherHashes(count int) []string {
+	hashes := make([]string, count)
+	for i := range hashes {
+		hashes[i] = fmt.Sprintf("0xf%063x", i)
+	}
+	return hashes
+}
+
 func (n *bundleTestNetwork) keptCount() int {
 	k := keepAliveFor(n)
 	k.mu.Lock()
@@ -212,6 +237,10 @@ func waitForBundles(t *testing.T, n *bundleTestNetwork, want int) []bundleTestCa
 
 func keepAliveOutcomes(outcome string) float64 {
 	return testutil.ToFloat64(telemetry.MetricBundleKeepAliveTotal.WithLabelValues("test-project", "evm:1", outcome))
+}
+
+func submissionOutcomes(outcome string) float64 {
+	return testutil.ToFloat64(telemetry.MetricBundleSubmissionTotal.WithLabelValues("test-project", "evm:1", outcome))
 }
 
 func TestBundleSubmission_NotConfigured_FallsThrough(t *testing.T) {
@@ -358,6 +387,57 @@ func TestBundleSubmission_HeadUnknown_NothingSent(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, common.HasErrorCode(err, common.ErrCodeUpstreamsExhausted), "a retryable, exhausted-class error; got %v", err)
 	assert.Empty(t, n.bundles())
+}
+
+func TestBundleSubmission_KeepAliveFull_NothingSent(t *testing.T) {
+	n := newBundleTestNetwork(100, bundleCfg(3))
+	n.holdInKeepAlive(otherHashes(bundleKeepAliveMaxKept)...)
+	fullBefore := submissionOutcomes(telemetry.BundleSubmissionOutcomeKeepAliveFull)
+
+	handled, resp, err := HandleProjectPreForward(context.Background(), n, sendRawTxRequest(`"`+sendRawTxFixture+`"`))
+
+	require.True(t, handled)
+	assert.Nil(t, resp, "a transaction that cannot be kept alive must not be answered as accepted")
+	require.Error(t, err)
+	assert.True(t, common.HasErrorCode(err, common.ErrCodeUpstreamsExhausted), "a retryable, exhausted-class error; got %v", err)
+	assert.Empty(t, n.bundles(), "nothing may be sent for a transaction that would not be kept alive")
+	assert.Equal(t, fullBefore+1, submissionOutcomes(telemetry.BundleSubmissionOutcomeKeepAliveFull))
+}
+
+func TestBundleSubmission_KeepAliveFull_StillTakesRebroadcasts(t *testing.T) {
+	n := newBundleTestNetwork(100, bundleCfg(3))
+	n.holdInKeepAlive(append(otherHashes(bundleKeepAliveMaxKept-1), sendRawTxFixtureHash)...)
+
+	// The relayer re-broadcasts a pending transaction every block. One that is
+	// already kept needs no new room.
+	_, resp, err := HandleProjectPreForward(context.Background(), n, sendRawTxRequest(`"`+sendRawTxFixture+`"`))
+
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	waitForBundles(t, n, 3)
+}
+
+func TestBundleSubmission_KeepAliveFilledConcurrently_NotAnsweredAsAccepted(t *testing.T) {
+	n := newBundleTestNetwork(100, bundleCfg(3))
+	others := otherHashes(bundleKeepAliveMaxKept)
+	n.holdInKeepAlive(others[:bundleKeepAliveMaxKept-1]...)
+	var once sync.Once
+	n.forwardFn = func(ctx context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
+		// A concurrent send takes the last place while this one is in flight.
+		once.Do(func() { n.holdInKeepAlive(others[bundleKeepAliveMaxKept-1]) })
+		return acceptBundle(ctx, req)
+	}
+	overflowBefore := keepAliveOutcomes(telemetry.BundleKeepAliveOutcomeOverflow)
+	fullBefore := submissionOutcomes(telemetry.BundleSubmissionOutcomeKeepAliveFull)
+
+	handled, resp, err := HandleProjectPreForward(context.Background(), n, sendRawTxRequest(`"`+sendRawTxFixture+`"`))
+
+	require.True(t, handled)
+	assert.Nil(t, resp, "a relay accepted it, but it will not be kept alive, so it must not be answered as accepted")
+	require.Error(t, err)
+	assert.True(t, common.HasErrorCode(err, common.ErrCodeUpstreamsExhausted), "got %v", err)
+	assert.Equal(t, overflowBefore+1, keepAliveOutcomes(telemetry.BundleKeepAliveOutcomeOverflow))
+	assert.Equal(t, fullBefore+1, submissionOutcomes(telemetry.BundleSubmissionOutcomeKeepAliveFull))
 }
 
 func TestBundleSubmission_SubmissionsOutliveTheCaller(t *testing.T) {

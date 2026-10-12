@@ -148,7 +148,10 @@ transaction never enters the normal path. For each request it:
    counts the transaction as `expired`, so a drop is never silent.
 
    Kept transactions live in memory, one set per network per process, capped at 10,000. A
-   restart forgets them, as a node restart forgets its mempool.
+   restart forgets them, as a node restart forgets its mempool. At the cap, a new
+   transaction is refused with a retryable error before anything is sent, rather than
+   accepted without being kept. A re-broadcast of a transaction that is already kept still
+   goes through.
 
 Requests to an upstream that sets `jsonRpc.flashbotsSigningKey` carry the header
 `X-Flashbots-Signature: <address>:<signature>`. The signature is the EIP-191
@@ -206,6 +209,7 @@ networks:
 | Every target block rejected | The earliest target block's error, normalized like any upstream error | All bundles |
 | Transaction undecodable, without a valid sender, or signed for another chain | Invalid-request error (HTTP 400) | Nothing |
 | Network head unknown | Retryable, exhausted-class error | Nothing |
+| Keep-alive is full (10,000 other transactions kept) | Retryable, exhausted-class error | Nothing |
 | Caller goes away first | The context error | Bundles keep going |
 
 The existing `eth_sendRawTransaction` network post-forward check still applies to
@@ -253,13 +257,17 @@ transaction.
 7. **Keep-alive is per process.** A client's re-broadcast may reach another rpc-proxy
    replica, which then keeps the transaction too. The resubmissions duplicate each other
    harmlessly: the same transaction for the same block.
+8. **A send can race others for the last keep-alive places.** If concurrent sends fill
+   keep-alive while one is in flight, that one gets the keep-alive-full error after a
+   relay has already accepted it for a target block. It may still land in that block, but
+   it is not resubmitted after its target blocks, so the caller must re-broadcast it.
 
 ### Observability
 
 | Metric | Type | Labels | When it fires |
 |---|---|---|---|
-| `erpc_bundle_submission_total` | counter | project, network, outcome | Once per answered `eth_sendRawTransaction`. Outcome is one of: `accepted`, `rejected`, `invalid_tx`, `head_unknown`, `abandoned`. |
-| `erpc_bundle_keepalive_total` | counter | project, network, outcome | Once per kept transaction when keep-alive stops. Outcome is one of: `settled` (nonce passed: included or replaced), `expired` (window ran out with the nonce unmoved: **dropped**), `overflow` (not kept, cap reached), `disabled` (bundleSubmission removed). |
+| `erpc_bundle_submission_total` | counter | project, network, outcome | Once per answered `eth_sendRawTransaction`. Outcome is one of: `accepted`, `rejected`, `invalid_tx`, `head_unknown`, `keepalive_full` (refused: no room to keep it alive), `abandoned`. |
+| `erpc_bundle_keepalive_total` | counter | project, network, outcome | Once per kept transaction when keep-alive stops. Outcome is one of: `settled` (nonce passed: included or replaced), `expired` (window ran out with the nonce unmoved: **dropped**), `overflow` (accepted by a relay, but concurrent sends filled keep-alive first; the caller got an error), `disabled` (bundleSubmission removed). |
 | `erpc_bundle_keepalive_tracked` | gauge | project, network | Transactions currently kept alive |
 | `erpc_upstream_request_total{category="eth_sendBundle"}` and the other upstream metrics | counter | standard | Every bundle sub-request, per relay upstream |
 

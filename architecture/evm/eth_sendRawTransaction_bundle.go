@@ -9,6 +9,7 @@ package evm
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -31,6 +32,10 @@ const bundleSubmissionDetachedTimeout = 30 * time.Second
 // bundleKeepAliveMaxKept bounds the memory and relay traffic of one network's
 // kept transactions in one process.
 const bundleKeepAliveMaxKept = 10_000
+
+// errBundleKeepAliveFull is why a send is refused while keep-alive is full:
+// answering it as accepted would promise retention it does not get.
+var errBundleKeepAliveFull = fmt.Errorf("bundle submission: %d transactions are already being kept alive", bundleKeepAliveMaxKept)
 
 // bundleKeepAliveTick is how often the keep-alive loop looks for a new network
 // head and submits target blocks that are due.
@@ -104,6 +109,14 @@ func submitRawTransactionAsBundles(ctx context.Context, n common.Network, nq *co
 	}
 	span.SetAttributes(attribute.Int64("head", head), attribute.Int("target_blocks", cfg.TargetBlocks))
 
+	ka := keepAliveFor(n)
+	if ka.full(tx.hash) {
+		record(telemetry.BundleSubmissionOutcomeKeepAliveFull)
+		return nil, common.NewErrUpstreamsExhaustedWithCause(
+			fmt.Errorf("%w, so this one could not be; nothing was sent", errBundleKeepAliveFull),
+		)
+	}
+
 	targets := make([]int64, 0, cfg.TargetBlocks)
 	for b := head + 1; b <= head+int64(cfg.TargetBlocks); b++ {
 		targets = append(targets, b)
@@ -116,7 +129,6 @@ func submitRawTransactionAsBundles(ctx context.Context, n common.Network, nq *co
 	// of every target block, so one that fails here is retried there.
 	answer := make(chan error, 1)
 	go func() {
-		ka := keepAliveFor(n)
 		pending := make(map[int64]struct{}, len(targets))
 		for _, b := range targets {
 			pending[b] = struct{}{}
@@ -129,8 +141,15 @@ func submitRawTransactionAsBundles(ctx context.Context, n common.Network, nq *co
 			switch {
 			case r.err == nil && !accepted:
 				accepted = true
-				ka.keep(tx, r.block, keys(pending), cfg.ResubmitFor.Duration())
-				answer <- nil
+				if ka.keep(tx, r.block, keys(pending), cfg.ResubmitFor.Duration()) {
+					answer <- nil
+				} else {
+					// Concurrent sends took the last places after the check above.
+					answer <- common.NewErrUpstreamsExhaustedWithCause(fmt.Errorf(
+						"%w, so this one will not be resubmitted after its target blocks, although a relay accepted it for block %d",
+						errBundleKeepAliveFull, r.block,
+					))
+				}
 			case accepted:
 				ka.recordTarget(tx.hash, r.block, r.err == nil)
 			}
@@ -151,6 +170,10 @@ func submitRawTransactionAsBundles(ctx context.Context, n common.Network, nq *co
 
 	select {
 	case err := <-answer:
+		if errors.Is(err, errBundleKeepAliveFull) {
+			record(telemetry.BundleSubmissionOutcomeKeepAliveFull)
+			return nil, err
+		}
 		if err != nil {
 			record(telemetry.BundleSubmissionOutcomeRejected)
 			lg.Warn().Err(err).
@@ -294,11 +317,20 @@ func keepAliveFor(n common.Network) *bundleKeepAlive {
 	return v.(*bundleKeepAlive)
 }
 
+// full reports whether keep-alive has no room for a transaction it does not
+// already keep. A re-broadcast of a kept transaction needs none.
+func (k *bundleKeepAlive) full(hash string) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	_, kept := k.kept[hash]
+	return !kept && len(k.kept) >= bundleKeepAliveMaxKept
+}
+
 // keep starts keeping tx alive for window, given the target block a relay just
-// accepted and the target blocks whose submission is still running. A
-// re-broadcast of a kept transaction adds to what it knows and restarts its
-// window.
-func (k *bundleKeepAlive) keep(tx *sendRawTx, acceptedBlock int64, inflight []int64, window time.Duration) {
+// accepted and the target blocks whose submission is still running, and
+// reports whether it could. A re-broadcast of a kept transaction adds to what
+// it knows and restarts its window.
+func (k *bundleKeepAlive) keep(tx *sendRawTx, acceptedBlock int64, inflight []int64, window time.Duration) bool {
 	deadline := time.Now().Add(window)
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -306,7 +338,7 @@ func (k *bundleKeepAlive) keep(tx *sendRawTx, acceptedBlock int64, inflight []in
 	if !ok {
 		if len(k.kept) >= bundleKeepAliveMaxKept {
 			k.record(telemetry.BundleKeepAliveOutcomeOverflow)
-			return
+			return false
 		}
 		kt = &keptTx{tx: tx, accepted: make(map[int64]struct{}), inflight: make(map[int64]struct{})}
 		k.kept[tx.hash] = kt
@@ -321,6 +353,7 @@ func (k *bundleKeepAlive) keep(tx *sendRawTx, acceptedBlock int64, inflight []in
 	for _, b := range inflight {
 		kt.inflight[b] = struct{}{}
 	}
+	return true
 }
 
 // recordTarget records how a kept transaction's submission for block ended. A
