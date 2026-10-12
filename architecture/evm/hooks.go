@@ -39,6 +39,9 @@ func HandleProjectPreForward(ctx context.Context, network common.Network, nq *co
 		return projectPreForward_eth_getLogs(ctx, network, nq)
 	case "trace_filter", "arbtrace_filter":
 		return projectPreForward_trace_filter(ctx, network, nq)
+	case "eth_sendrawtransaction":
+		// Fork (RHI-7827): bundle submission; a no-op unless configured.
+		return projectPreForward_eth_sendRawTransaction(ctx, network, nq)
 	default:
 		return false, nil, nil
 	}

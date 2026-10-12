@@ -747,6 +747,9 @@ func (p *ProjectConfig) Validate(c *Config) error {
 	if err := validateSvmUpstreamNetworkPairing(p.Upstreams, p.Networks); err != nil {
 		return err
 	}
+	if err := validateBundleSubmissionNotDefaulted(p.NetworkDefaults); err != nil {
+		return err
+	}
 	if p.Auth != nil {
 		if err := p.Auth.Validate(); err != nil {
 			return err
@@ -1365,6 +1368,9 @@ func (p *PunishMisbehaviorConfig) Validate() error {
 }
 
 func (j *JsonRpcUpstreamConfig) Validate(c *Config) error {
+	if err := j.validateFlashbotsSigning(); err != nil {
+		return err
+	}
 	if j.SupportsBatch != nil && *j.SupportsBatch {
 		if j.BatchMaxWait == 0 {
 			return fmt.Errorf("jsonRpc.batchMaxWait is required and must be greater than 0")
@@ -1535,6 +1541,11 @@ func (e *EvmNetworkConfig) Validate() error {
 	if e.SafeBlockSource != "" {
 		if err := ValidatePattern(e.SafeBlockSource); err != nil {
 			return fmt.Errorf("network.*.evm.safeBlockSource has invalid selector %q: %w", e.SafeBlockSource, err)
+		}
+	}
+	if e.BundleSubmission != nil {
+		if err := e.BundleSubmission.Validate(); err != nil {
+			return err
 		}
 	}
 	return nil

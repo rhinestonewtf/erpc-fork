@@ -6,4 +6,5 @@ module.exports = {
 	cors: { title: "CORS" },
 	"static-responses": { title: "Static responses" },
 	"shadow-upstreams": { title: "Shadow upstreams" },
+	"bundle-submission": { title: "Bundle submission" },
 };
