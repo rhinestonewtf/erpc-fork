@@ -9,6 +9,7 @@ import (
 	"github.com/blockchain-data-standards/manifesto/evm"
 	"github.com/bytedance/sonic"
 	"github.com/erpc/erpc/common"
+	"github.com/erpc/erpc/data"
 )
 
 // blockStreamMaxBackfill bounds how many blocks a single advance may backfill.
@@ -45,7 +46,7 @@ func (m *blockStreamManager) hubFor(ctx context.Context, network *Network) *bloc
 		return h
 	}
 
-	h := &blockStreamHub{subs: make(map[*blockStreamSub]struct{})}
+	h := &blockStreamHub{subs: make(map[*blockStreamSub]struct{}), hashes: make(map[int64]string)}
 	// Wire the hub onto every upstream's latest-block callback and seed the head
 	// with the highest value any of them already observed. The head is the max
 	// across upstreams; advance() merges the independent callbacks monotonically.
@@ -57,7 +58,9 @@ func (m *blockStreamManager) hubFor(ctx context.Context, network *Network) *bloc
 		if v := sp.LatestBlock(); v > h.head.Load() {
 			h.head.Store(v)
 		}
-		if reg, ok := sp.(interface{ OnLatestBlock(func(int64)) }); ok {
+		if reg, ok := sp.(interface {
+			OnLatestBlock(func(data.CounterInt64Observation))
+		}); ok {
 			reg.OnLatestBlock(h.advance)
 		}
 	}
@@ -71,6 +74,12 @@ type blockStreamHub struct {
 
 	mu   sync.Mutex
 	subs map[*blockStreamSub]struct{}
+	// hashes maps a block number to the hash a poller observed at that height
+	// (fork RHI-8178). The subscriber loop fetches such blocks by hash, which
+	// the poller has already written into the shared cache, instead of by
+	// number from upstream. Bounded to the backfill window behind head; a
+	// number without an entry is a gap and is fetched by number as before.
+	hashes map[int64]string
 }
 
 // blockStreamSub is one subscriber's edge-triggered wake-up. The channel is
@@ -83,7 +92,23 @@ type blockStreamSub struct {
 // advance records a new head and wakes subscribers. It runs synchronously inside
 // the poller's shared-variable update path, so it only does a monotonic CAS and
 // non-blocking sends — never any blocking work.
-func (h *blockStreamHub) advance(v int64) {
+//
+// An observation carrying a hash is recorded whether or not the head moves: the
+// number may have arrived first (a request-path suggestion) and the hash a
+// moment later from the fetching replica, and a later observation of the same
+// height with a different hash replaces the earlier one.
+func (h *blockStreamHub) advance(obs data.CounterInt64Observation) {
+	v := obs.Value
+	if obs.BlockHash != "" {
+		h.mu.Lock()
+		h.hashes[v] = obs.BlockHash
+		for n := range h.hashes {
+			if n < v-blockStreamMaxBackfill {
+				delete(h.hashes, n)
+			}
+		}
+		h.mu.Unlock()
+	}
 	for {
 		cur := h.head.Load()
 		if v <= cur {
@@ -102,6 +127,14 @@ func (h *blockStreamHub) advance(v int64) {
 		}
 	}
 	h.mu.Unlock()
+}
+
+// hashFor returns the hash a poller observed at block number n, if any.
+func (h *blockStreamHub) hashFor(n int64) (string, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	hash, ok := h.hashes[n]
+	return hash, ok
 }
 
 func (h *blockStreamHub) subscribe() *blockStreamSub {
@@ -169,7 +202,8 @@ func (rp *RequestProcessor) ProcessBlockStream(
 				continue
 			}
 			for n := lastSent + 1; n <= head; n++ {
-				header, err := rp.fetchBlockHeader(ctx, input, n)
+				hash, _ := hub.hashFor(n)
+				header, err := rp.fetchBlockHeader(ctx, input, n, hash)
 				if err != nil {
 					return err
 				}
@@ -188,19 +222,43 @@ func (rp *RequestProcessor) ProcessBlockStream(
 }
 
 // fetchBlockHeader resolves one block's header through the normal cached request
-// path (eth_getBlockByNumber, hashes-only). Concurrent identical fetches across
-// subscribers are coalesced by erpc, so a shared head yields ~one upstream call
-// per block. Returns (nil, nil) when the block is not yet available.
+// path (hashes-only). With a hash the poller observed at that height it asks by
+// hash first (fork RHI-8178): the poller wrote that block into the shared cache
+// when it fetched it, so this is a cache hit on any replica and never an
+// upstream call for a block the cluster already holds. Without a hash, or when
+// the hash is unknown to the upstream, it falls back to eth_getBlockByNumber.
+// Concurrent identical fetches across subscribers are coalesced by erpc, so a
+// shared head yields ~one upstream call per block. Returns (nil, nil) when the
+// block is not yet available.
 func (rp *RequestProcessor) fetchBlockHeader(
 	ctx context.Context,
 	input *RequestInput,
 	blockNumber int64,
+	blockHash string,
 ) (*evm.BlockHeader, error) {
-	resp, err := rp.ProcessUnary(
-		ctx,
-		input,
-		buildJSONRPCRequest("eth_getBlockByNumber", []interface{}{fmt.Sprintf("0x%x", blockNumber), false}),
-	)
+	if blockHash != "" {
+		header, err := rp.fetchHeader(ctx, input, buildJSONRPCRequest("eth_getBlockByHash", []interface{}{blockHash, false}))
+		if err == nil && header != nil {
+			return header, nil
+		}
+		// The by-hash read is an optimisation over the path that worked before
+		// it existed, so ANY miss degrades to that path: a null result, or an
+		// error, which is how some upstreams report an unknown hash (normalised
+		// here to missing-data). The by-number fetch returns its own error if
+		// the upstream is really down.
+		if err != nil {
+			rp.logger.Debug().Err(err).Str("blockHash", blockHash).Int64("blockNumber", blockNumber).Msg("by-hash header fetch failed, falling back to by-number")
+		}
+	}
+	return rp.fetchHeader(ctx, input, buildJSONRPCRequest("eth_getBlockByNumber", []interface{}{fmt.Sprintf("0x%x", blockNumber), false}))
+}
+
+func (rp *RequestProcessor) fetchHeader(
+	ctx context.Context,
+	input *RequestInput,
+	req []byte,
+) (*evm.BlockHeader, error) {
+	resp, err := rp.ProcessUnary(ctx, input, req)
 	if err != nil {
 		return nil, err
 	}

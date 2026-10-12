@@ -111,6 +111,11 @@ type EvmStatePoller struct {
 
 	stateMu sync.RWMutex
 
+	// Fork RHI-8178: the network and cache that fetched blocks are written to by
+	// hash; nil until the network is wired (see evm_state_poller_block_cache.go).
+	blockCacheNetwork common.Network
+	blockCache        common.CacheDAL
+
 	// Track if updates are in progress to avoid goroutine pile-up
 	finalizedUpdateInProgress sync.Mutex
 
@@ -172,15 +177,15 @@ func NewEvmStatePoller(
 		earliestInitialDetectionDone: make(map[common.EvmAvailabilityProbeType]bool),
 	}
 
-	lbs.OnValue(func(value int64, blockTimestamp int64) {
+	lbs.OnValue(func(obs data.CounterInt64Observation) {
 		// Fork RHI-8244: the timestamp arrives with the head whether this replica
 		// fetched the block or a peer did, so every replica samples block time.
 		// A head learned without one (SuggestLatestBlock, an older peer) passes 0,
 		// which the tracker treats as unknown.
-		e.tracker.SetLatestBlockNumber(e.upstream, value, blockTimestamp)
+		e.tracker.SetLatestBlockNumber(e.upstream, obs.Value, obs.BlockTimestamp)
 	})
-	fbs.OnValue(func(value int64, _ int64) {
-		e.tracker.SetFinalizedBlockNumber(e.upstream, value)
+	fbs.OnValue(func(obs data.CounterInt64Observation) {
+		e.tracker.SetFinalizedBlockNumber(e.upstream, obs.Value)
 	})
 
 	lbs.OnLargeRollback(func(currentVal, newVal int64) {
@@ -501,7 +506,7 @@ func (e *EvmStatePoller) PollLatestBlockNumber(ctx context.Context) (int64, erro
 	// upstream #1208 introduced. One fetch per cluster per debounce window; the
 	// block timestamp rides along in the shared record, so the replicas that did
 	// not fetch still sample block time (see data/shared_state_block_timestamp.go).
-	return e.latestBlockShared.TryUpdateIfStale(ctx, dbi, func(ctx context.Context) (int64, int64, error) {
+	return e.latestBlockShared.TryUpdateIfStale(ctx, dbi, func(ctx context.Context) (data.CounterInt64Observation, error) {
 		if e.logger.GetLevel() <= zerolog.TraceLevel {
 			e.logger.Trace().Str("ptr", fmt.Sprintf("%p", e)).Str("stack", string(debug.Stack())).Msg("fetching latest block number for evm state poller")
 		}
@@ -511,7 +516,8 @@ func (e *EvmStatePoller) PollLatestBlockNumber(ctx context.Context) (int64, erro
 			networkLabel,
 			e.upstream.Id(),
 		).Inc()
-		blockNum, blockTimestamp, err := e.fetchBlock(ctx, "latest")
+		fb, err := e.fetchBlock(ctx, "latest")
+		blockNum, blockTimestamp, blockHash := fb.number, fb.timestamp, fb.hash
 		if err != nil || blockNum == 0 {
 			if err == nil ||
 				common.HasErrorCode(err,
@@ -533,7 +539,7 @@ func (e *EvmStatePoller) PollLatestBlockNumber(ctx context.Context) (int64, erro
 					}
 				}
 				e.stateMu.Unlock()
-				return 0, 0, nil
+				return data.CounterInt64Observation{}, nil
 			} else {
 				// An open circuit breaker short-circuits before tryForward
 				// records the failure, which would freeze the upstream's error
@@ -543,7 +549,7 @@ func (e *EvmStatePoller) PollLatestBlockNumber(ctx context.Context) (int64, erro
 					e.tracker.RecordUpstreamFailure(e.upstream, "eth_getBlockByNumber", common.DataFinalityStateRealtime, err)
 				}
 				e.logger.Warn().Err(err).Msg("failed to get latest block number in evm state poller")
-				return 0, 0, err
+				return data.CounterInt64Observation{}, err
 			}
 		}
 
@@ -556,7 +562,7 @@ func (e *EvmStatePoller) PollLatestBlockNumber(ctx context.Context) (int64, erro
 		// A major move must pass a fresh chain-identity check before entering
 		// the shared counter / tracker (see verifyChainIdOnMajorHeadMove).
 		if !e.verifyChainIdOnMajorHeadMove(ctx, "latest", e.latestBlockShared.GetValue(), blockNum) {
-			return 0, 0, nil
+			return data.CounterInt64Observation{}, nil
 		}
 
 		// Directly update tracker with the correct timestamp for this locally-fetched block
@@ -567,7 +573,7 @@ func (e *EvmStatePoller) PollLatestBlockNumber(ctx context.Context) (int64, erro
 			Int64("blockNumber", blockNum).
 			Int64("blockTimestamp", blockTimestamp).
 			Msg("fetched latest block from upstream")
-		return blockNum, blockTimestamp, nil
+		return data.CounterInt64Observation{Value: blockNum, BlockTimestamp: blockTimestamp, BlockHash: blockHash}, nil
 	})
 }
 
@@ -683,14 +689,16 @@ func (e *EvmStatePoller) LatestBlock() int64 {
 // OnLatestBlock registers cb to fire on every forward advance of the latest block
 // number, regardless of source — a proactive poll, a SuggestLatestBlock
 // write-through from request traffic, or cross-node propagation of the shared
-// counter all flow through the same callback.
+// counter all flow through the same callback. It also fires when the block
+// fields of the current head are filled in or superseded (fork RHI-8178), so a
+// consumer that needs the hash gets it even when the number arrived first.
 //
 // IMPORTANT: cb runs synchronously inside the shared-variable update path, so it
 // MUST NOT block (do a non-blocking hand-off and return). Callbacks cannot be
 // unregistered, so register once per long-lived consumer, never per request.
-func (e *EvmStatePoller) OnLatestBlock(cb func(int64)) {
+func (e *EvmStatePoller) OnLatestBlock(cb func(data.CounterInt64Observation)) {
 	if e.latestBlockShared != nil {
-		e.latestBlockShared.OnValue(func(value int64, _ int64) { cb(value) })
+		e.latestBlockShared.OnValue(cb)
 	}
 }
 
@@ -828,7 +836,7 @@ func (e *EvmStatePoller) PollFinalizedBlockNumber(ctx context.Context) (int64, e
 
 	dbi := e.resolveFinalizedDebounce(cfg, e.resolveDebounce(cfg))
 
-	return e.finalizedBlockShared.TryUpdateIfStale(ctx, dbi, func(ctx context.Context) (int64, int64, error) {
+	return e.finalizedBlockShared.TryUpdateIfStale(ctx, dbi, func(ctx context.Context) (data.CounterInt64Observation, error) {
 		e.logger.Trace().Msg("fetching finalized block number for evm state poller")
 		telemetry.MetricUpstreamFinalizedBlockPolled.WithLabelValues(
 			e.projectId,
@@ -838,7 +846,8 @@ func (e *EvmStatePoller) PollFinalizedBlockNumber(ctx context.Context) (int64, e
 		).Inc()
 
 		// Actually fetch from upstream
-		blockNum, blockTimestamp, err := e.fetchBlock(ctx, "finalized")
+		fb, err := e.fetchBlock(ctx, "finalized")
+		blockNum, blockTimestamp, blockHash := fb.number, fb.timestamp, fb.hash
 		if err != nil || blockNum == 0 {
 			if err == nil ||
 				common.HasErrorCode(err,
@@ -859,7 +868,7 @@ func (e *EvmStatePoller) PollFinalizedBlockNumber(ctx context.Context) (int64, e
 					}
 				}
 				e.stateMu.Unlock()
-				return 0, 0, nil
+				return data.CounterInt64Observation{}, nil
 			} else {
 				// See PollLatestBlockNumber.
 				if e.tracker != nil && common.HasErrorCode(err, common.ErrCodeFailsafeCircuitBreakerOpen) {
@@ -867,7 +876,7 @@ func (e *EvmStatePoller) PollFinalizedBlockNumber(ctx context.Context) (int64, e
 					e.tracker.RecordUpstreamFailure(e.upstream, "eth_getBlockByNumber", common.DataFinalityStateFinalized, err)
 				}
 				e.logger.Warn().Err(err).Msg("failed to get finalized block number in evm state poller")
-				return 0, 0, err
+				return data.CounterInt64Observation{}, err
 			}
 		}
 
@@ -879,7 +888,7 @@ func (e *EvmStatePoller) PollFinalizedBlockNumber(ctx context.Context) (int64, e
 
 		// Same chain-identity gate as the latest ratchet (see there).
 		if !e.verifyChainIdOnMajorHeadMove(ctx, "finalized", e.finalizedBlockShared.GetValue(), blockNum) {
-			return 0, 0, nil
+			return data.CounterInt64Observation{}, nil
 		}
 
 		e.logger.Debug().
@@ -888,7 +897,7 @@ func (e *EvmStatePoller) PollFinalizedBlockNumber(ctx context.Context) (int64, e
 
 		e.tracker.SetFinalizedBlockNumber(e.upstream, blockNum)
 
-		return blockNum, blockTimestamp, nil
+		return data.CounterInt64Observation{Value: blockNum, BlockTimestamp: blockTimestamp, BlockHash: blockHash}, nil
 	})
 }
 
@@ -962,7 +971,7 @@ func (e *EvmStatePoller) PollEarliestBlockNumber(ctx context.Context, probe comm
 
 	// Use TryUpdateIfStale for cross-instance coordination
 	// Only one instance will do the binary search at a time
-	return v.TryUpdateIfStale(ctx, staleness, func(ctx context.Context) (int64, int64, error) {
+	return v.TryUpdateIfStale(ctx, staleness, func(ctx context.Context) (data.CounterInt64Observation, error) {
 		latest := e.latestBlockShared.GetValue()
 		if latest == 0 {
 			var err error
@@ -973,7 +982,7 @@ func (e *EvmStatePoller) PollEarliestBlockNumber(ctx context.Context, probe comm
 					Str("probe", string(probe)).
 					Str("upstreamId", e.upstream.Config().Id).
 					Msg("failed to get latest block for earliest detection; block availability checks will fail-open")
-				return 0, 0, err
+				return data.CounterInt64Observation{}, err
 			}
 		}
 
@@ -985,7 +994,7 @@ func (e *EvmStatePoller) PollEarliestBlockNumber(ctx context.Context, probe comm
 				Str("probe", string(probe)).
 				Str("upstreamId", e.upstream.Config().Id).
 				Msg("binary search failed for earliest block detection; block availability checks will fail-open")
-			return 0, 0, err
+			return data.CounterInt64Observation{}, err
 		}
 
 		e.logger.Debug().
@@ -995,7 +1004,7 @@ func (e *EvmStatePoller) PollEarliestBlockNumber(ctx context.Context, probe comm
 			Str("upstreamId", e.upstream.Config().Id).
 			Msg("binary search completed for earliest block availability bound")
 
-		return val, 0, nil
+		return data.CounterInt64Observation{Value: val}, nil
 	})
 }
 
@@ -1358,7 +1367,7 @@ func (e *EvmStatePoller) shouldSkipFinalizedCheck() bool {
 	return e.skipFinalizedCheck
 }
 
-func (e *EvmStatePoller) fetchBlock(ctx context.Context, blockTag string) (int64, int64, error) {
+func (e *EvmStatePoller) fetchBlock(ctx context.Context, blockTag string) (fetchedBlock, error) {
 	pr := common.NewNormalizedRequest([]byte(
 		fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"eth_getBlockByNumber","params":["%s",false]}`, util.RandomID(), blockTag),
 	))
@@ -1367,23 +1376,23 @@ func (e *EvmStatePoller) fetchBlock(ctx context.Context, blockTag string) (int64
 		defer resp.Release()
 	}
 	if err != nil {
-		return 0, 0, err
+		return fetchedBlock{}, err
 	}
 	jrr, err := resp.JsonRpcResponse()
 	if err != nil {
-		return 0, 0, err
+		return fetchedBlock{}, err
 	}
 	if jrr == nil || jrr.Error != nil {
-		return 0, 0, jrr.Error
+		return fetchedBlock{}, jrr.Error
 	}
 
 	if jrr.IsResultEmptyish(ctx) {
-		return 0, 0, nil
+		return fetchedBlock{}, nil
 	}
 
 	numberStr, err := jrr.PeekStringByPath(ctx, "number")
 	if err != nil {
-		return 0, 0, &common.BaseError{
+		return fetchedBlock{}, &common.BaseError{
 			Code:    "ErrEvmStatePoller",
 			Message: "cannot get block number from block data",
 			Details: map[string]interface{}{
@@ -1396,7 +1405,14 @@ func (e *EvmStatePoller) fetchBlock(ctx context.Context, blockTag string) (int64
 	numberStr = string(append([]byte(nil), numberStr...))
 	blockNum, err := common.HexToInt64(numberStr)
 	if err != nil {
-		return 0, 0, err
+		return fetchedBlock{}, err
+	}
+
+	// Fork RHI-8178: the hash travels with the head through shared state, and
+	// the block goes into the network's cache under it (cacheBlockByHash below).
+	blockHash := ""
+	if h, herr := jrr.PeekStringByPath(ctx, "hash"); herr == nil {
+		blockHash = string(append([]byte(nil), h...))
 	}
 
 	// Extract timestamp using shared function
@@ -1410,7 +1426,14 @@ func (e *EvmStatePoller) fetchBlock(ctx context.Context, blockTag string) (int64
 		blockTimestamp = 0
 	}
 
-	return blockNum, blockTimestamp, nil
+	// Only the tip is ever read back by hash (the stream, a reorg walk); the
+	// finalized-tag block would also be misclassified unfinalized here, since
+	// the finalized head it IS has not been stored yet (RHI-8260).
+	if blockTag == "latest" {
+		e.cacheBlockByHash(ctx, resp, blockHash)
+	}
+
+	return fetchedBlock{number: blockNum, timestamp: blockTimestamp, hash: blockHash}, nil
 }
 
 func (e *EvmStatePoller) fetchSyncingState(ctx context.Context) (bool, error) {

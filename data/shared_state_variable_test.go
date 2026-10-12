@@ -87,8 +87,8 @@ func TestSharedVariable(t *testing.T) {
 
 		// Setup callback
 		callbackCalled := make(chan int64, 1)
-		counter.OnValue(func(val int64, _ int64) {
-			callbackCalled <- val
+		counter.OnValue(func(o CounterInt64Observation) {
+			callbackCalled <- o.Value
 		})
 
 		// Simulate remote update
@@ -485,11 +485,11 @@ func TestCounterInt64_TryUpdateIfStale(t *testing.T) {
 			counter.value.Store(tt.initialValue)
 			counter.updatedAtUnixMs.Store(tt.lastProcessed.UnixMilli())
 
-			getNewValue := func(ctx context.Context) (int64, int64, error) {
+			getNewValue := func(ctx context.Context) (CounterInt64Observation, error) {
 				if tt.expectedError != nil {
-					return 0, 0, tt.expectedError
+					return CounterInt64Observation{}, tt.expectedError
 				}
-				return tt.updateValue, 0, nil
+				return CounterInt64Observation{Value: tt.updateValue}, nil
 			}
 
 			result, err := counter.TryUpdateIfStale(ctx, tt.staleness, getNewValue)
@@ -608,7 +608,7 @@ func TestCounterInt64_SetValueUpdatesLastUpdated(t *testing.T) {
 	}
 
 	// Simulate a write originating from the remote sync by calling setValue directly.
-	counter.processNewValue(UpdateSourceTest, 123, 0)
+	counter.processNewValue(UpdateSourceTest, CounterInt64Observation{Value: 123})
 
 	// Immediately after the write the counter must not be considered stale for any reasonable staleness window.
 	assert.False(t, counter.IsStale(time.Second), "counter should not be stale right after setValue call")
@@ -783,9 +783,9 @@ func TestCounterInt64_TryUpdateIfStale_NoThunderingHerdEqualValue(t *testing.T) 
 	counter.updatedAtUnixMs.Store(time.Now().Add(-2 * time.Second).UnixMilli())
 
 	var calls int32
-	refreshFn := func(ctx context.Context) (int64, int64, error) {
+	refreshFn := func(ctx context.Context) (CounterInt64Observation, error) {
 		atomic.AddInt32(&calls, 1)
-		return 5, 0, nil // identical value
+		return CounterInt64Observation{Value: 5}, nil // identical value
 	}
 
 	staleness := time.Second
@@ -818,9 +818,9 @@ func TestCounterInt64_TryUpdateIfStale_NoThunderingHerdOnError(t *testing.T) {
 
 	var calls int32
 	refreshErr := errors.New("upstream failure")
-	refreshFn := func(ctx context.Context) (int64, int64, error) {
+	refreshFn := func(ctx context.Context) (CounterInt64Observation, error) {
 		atomic.AddInt32(&calls, 1)
-		return 0, 0, refreshErr
+		return CounterInt64Observation{}, refreshErr
 	}
 
 	staleness := time.Second
@@ -872,11 +872,11 @@ func TestCounterInt64_TryUpdateIfStale_FnTimeoutFromCtxDeadline(t *testing.T) {
 		defer cancel()
 
 		var fnTimeout time.Duration
-		refreshFn := func(fnCtx context.Context) (int64, int64, error) {
+		refreshFn := func(fnCtx context.Context) (CounterInt64Observation, error) {
 			if deadline, ok := fnCtx.Deadline(); ok {
 				fnTimeout = time.Until(deadline)
 			}
-			return 0, 0, refreshErr
+			return CounterInt64Observation{}, refreshErr
 		}
 
 		_, err := counter.TryUpdateIfStale(ctx, time.Second, refreshFn)
@@ -893,11 +893,11 @@ func TestCounterInt64_TryUpdateIfStale_FnTimeoutFromCtxDeadline(t *testing.T) {
 		counter := makeCounter(t, registry, "test-no-deadline")
 
 		var fnTimeout time.Duration
-		refreshFn := func(fnCtx context.Context) (int64, int64, error) {
+		refreshFn := func(fnCtx context.Context) (CounterInt64Observation, error) {
 			if deadline, ok := fnCtx.Deadline(); ok {
 				fnTimeout = time.Until(deadline)
 			}
-			return 0, 0, refreshErr
+			return CounterInt64Observation{}, refreshErr
 		}
 
 		_, err := counter.TryUpdateIfStale(context.Background(), time.Second, refreshFn)
@@ -917,11 +917,11 @@ func TestCounterInt64_TryUpdateIfStale_FnTimeoutFromCtxDeadline(t *testing.T) {
 		defer cancel()
 
 		var fnTimeout time.Duration
-		refreshFn := func(fnCtx context.Context) (int64, int64, error) {
+		refreshFn := func(fnCtx context.Context) (CounterInt64Observation, error) {
 			if deadline, ok := fnCtx.Deadline(); ok {
 				fnTimeout = time.Until(deadline)
 			}
-			return 0, 0, refreshErr
+			return CounterInt64Observation{}, refreshErr
 		}
 
 		_, err := counter.TryUpdateIfStale(ctx, time.Second, refreshFn)
@@ -1128,14 +1128,14 @@ func TestSharedVariableTimeoutHandling(t *testing.T) {
 		executionCount := atomic.Int32{}
 		start := time.Now()
 
-		value, err := counter.TryUpdateIfStale(operationCtx, 100*time.Millisecond, func(ctx context.Context) (int64, int64, error) {
+		value, err := counter.TryUpdateIfStale(operationCtx, 100*time.Millisecond, func(ctx context.Context) (CounterInt64Observation, error) {
 			executionCount.Add(1)
 			// This simulates the actual operation (e.g., fetching block number)
 			select {
 			case <-ctx.Done():
-				return 0, 0, ctx.Err()
+				return CounterInt64Observation{}, ctx.Err()
 			case <-time.After(100 * time.Millisecond):
-				return 42, 0, nil
+				return CounterInt64Observation{Value: 42}, nil
 			}
 		})
 
@@ -1270,7 +1270,7 @@ func TestSharedVariableTimeoutHandling(t *testing.T) {
 		})
 
 		// Process a value with large rollback (gap=100 > ignoreRollbackOf=10)
-		counter.processNewValue(UpdateSourceRemoteSync, 100, 0)
+		counter.processNewValue(UpdateSourceRemoteSync, CounterInt64Observation{Value: 100})
 
 		// Value SHOULD be rolled back (large rollback is applied)
 		assert.Equal(t, int64(100), counter.GetValue())
@@ -1300,12 +1300,12 @@ func TestCounterInt64_EarliestBlockSemantics(t *testing.T) {
 
 		// Simulate detection that earliest is actually lower (e.g., re-detection found earlier block)
 		// This is a DECREASE: 1500 → 1000
-		updated := counter.processNewValue(UpdateSourceTryUpdate, 1000, 0)
+		updated := counter.processNewValue(UpdateSourceTryUpdate, CounterInt64Observation{Value: 1000})
 		assert.True(t, updated, "should accept decrease with ignoreRollbackOf=0")
 		assert.Equal(t, int64(1000), counter.GetValue())
 
 		// Also accepts increases (forward progress due to pruning)
-		updated = counter.processNewValue(UpdateSourceTryUpdate, 2000, 0)
+		updated = counter.processNewValue(UpdateSourceTryUpdate, CounterInt64Observation{Value: 2000})
 		assert.True(t, updated, "should also accept increases")
 		assert.Equal(t, int64(2000), counter.GetValue())
 	})
@@ -1950,7 +1950,7 @@ func TestCounterInt64_ZeroIsNotAHeadObservation(t *testing.T) {
 		var rollbacks int
 		counter.OnLargeRollback(func(int64, int64) { rollbacks++ })
 
-		updated := counter.processNewValue(UpdateSourceTryUpdate, 0, 0)
+		updated := counter.processNewValue(UpdateSourceTryUpdate, CounterInt64Observation{Value: 0})
 
 		assert.False(t, updated, "a zero head must be rejected on the local path too")
 		assert.Equal(t, int64(71_589_993), counter.GetValue())
@@ -1960,7 +1960,7 @@ func TestCounterInt64_ZeroIsNotAHeadObservation(t *testing.T) {
 	t.Run("negative values are rejected too", func(t *testing.T) {
 		counter := newHeadCounter(1_000_000)
 
-		assert.False(t, counter.processNewValue(UpdateSourceTryUpdate, -1, 0))
+		assert.False(t, counter.processNewValue(UpdateSourceTryUpdate, CounterInt64Observation{Value: -1}))
 		assert.Equal(t, int64(1_000_000), counter.GetValue())
 	})
 
@@ -1972,7 +1972,7 @@ func TestCounterInt64_ZeroIsNotAHeadObservation(t *testing.T) {
 
 		// The guard must not blunt the behaviour it sits next to: a genuine deep
 		// reorg is a positive value and still exceeds ignoreRollbackOf.
-		updated := counter.processNewValue(UpdateSourceTryUpdate, 995_000, 0)
+		updated := counter.processNewValue(UpdateSourceTryUpdate, CounterInt64Observation{Value: 995_000})
 
 		assert.True(t, updated, "a real reorg must still be applied")
 		assert.Equal(t, int64(995_000), counter.GetValue())
@@ -1993,7 +1993,7 @@ func TestCounterInt64_ZeroIsNotAHeadObservation(t *testing.T) {
 		counter.value.Store(5_000_000)
 		counter.updatedAtUnixMs.Store(1)
 
-		updated := counter.processNewValue(UpdateSourceTryUpdate, 0, 0)
+		updated := counter.processNewValue(UpdateSourceTryUpdate, CounterInt64Observation{Value: 0})
 
 		assert.True(t, updated, "earliest-block counters legitimately move to 0")
 		assert.Equal(t, int64(0), counter.GetValue())
@@ -2017,12 +2017,12 @@ func TestCounterInt64_TryUpdateIfStale_AsyncResultWithinExtendedTimeoutIsApplied
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	refreshFn := func(fnCtx context.Context) (int64, int64, error) {
+	refreshFn := func(fnCtx context.Context) (CounterInt64Observation, error) {
 		select {
 		case <-time.After(2 * time.Second):
-			return 42, 0, nil
+			return CounterInt64Observation{Value: 42}, nil
 		case <-fnCtx.Done():
-			return 0, 0, fnCtx.Err()
+			return CounterInt64Observation{}, fnCtx.Err()
 		}
 	}
 

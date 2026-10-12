@@ -224,12 +224,12 @@ func covPollerHistory(latest, earliest int64) covPollerHandler {
 func covPollerUnsupportedErrors() map[string]error {
 	cause := errors.New("the method eth_getBlockByNumber does not exist/is not available")
 	return map[string]error{
-		"EndpointUnsupported":  common.NewErrEndpointUnsupported(cause),
-		"UpstreamSkipped":      common.NewErrUpstreamRequestSkipped(cause, "u"),
-		"MethodIgnored":        common.NewErrUpstreamMethodIgnored("eth_getBlockByNumber", "u"),
-		"EndpointMissingData":  common.NewErrEndpointMissingData(cause, nil),
-		"ClientSideException":  common.NewErrEndpointClientSideException(cause),
-		"EmptyResult(no err)":  nil,
+		"EndpointUnsupported": common.NewErrEndpointUnsupported(cause),
+		"UpstreamSkipped":     common.NewErrUpstreamRequestSkipped(cause, "u"),
+		"MethodIgnored":       common.NewErrUpstreamMethodIgnored("eth_getBlockByNumber", "u"),
+		"EndpointMissingData": common.NewErrEndpointMissingData(cause, nil),
+		"ClientSideException": common.NewErrEndpointClientSideException(cause),
+		"EmptyResult(no err)": nil,
 	}
 }
 
@@ -661,7 +661,7 @@ func TestCovPoller_SuggestFinalizedBlock_SkippedWhileUpdateInProgress(t *testing
 func TestCovPoller_OnLatestBlock_FiresForEveryAdvance(t *testing.T) {
 	p, up, ctx := covPollerNew(t, "cov-onlatest", covPollerBlocks(300, 1))
 	got := make(chan int64, 8)
-	p.OnLatestBlock(func(v int64) { got <- v })
+	p.OnLatestBlock(func(o data.CounterInt64Observation) { got <- o.Value })
 
 	p.SuggestLatestBlock(200)
 	assert.Equal(t, int64(200), <-got)
@@ -692,7 +692,7 @@ func TestCovPoller_RefreshLatestBlock(t *testing.T) {
 		bare := &EvmStatePoller{upstream: up}
 		assert.False(t, bare.IsObjectNull())
 		bare.RefreshLatestBlock()
-		bare.OnLatestBlock(func(int64) {})
+		bare.OnLatestBlock(func(data.CounterInt64Observation) {})
 		assert.Zero(t, up.callCount("eth_getBlockByNumber"), "no shared counter, nothing to refresh")
 	})
 
