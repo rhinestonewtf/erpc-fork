@@ -8,7 +8,7 @@ then committed **directly to `main`**, because the squash hash does not exist un
 after the merge. If you drop a patch, move it to [Removed](#removed-patches) with the
 reason.
 
-Currently rebased onto upstream **`0.3.0`** (`a9891440`, released 2026-09-21).
+Currently rebased onto upstream **`0.4.0`** (`120c35e1`, released 2026-10-11).
 
 ## Why this file exists
 
@@ -23,8 +23,8 @@ Currently rebased onto upstream **`0.3.0`** (`a9891440`, released 2026-09-21).
   dropped a merged code fix two days after it landed, and nobody noticed for six months,
   because the working mental model was "our patches are the CI and config ones".
 
-That last point is why `9d91a08d` deserves a warning: it is named *"update prod
-config"* but also carries two Go code patches. Do not assume a commit's subject tells
+That last point is why `301093f3` deserves a warning: it is named *"update prod
+config"* but also carries a Go code patch. Do not assume a commit's subject tells
 you whether it touches code.
 
 ## Verifying after a sync
@@ -40,8 +40,6 @@ Then run every probe in the table. All of them must print `OK`:
 grep -q "isTerminalGasLimitRejection" architecture/evm/error_normalizer.go && echo OK
 grep -q "terminalGasLimitRejections" architecture/evm/gas_limit_errors.go && echo OK
 grep -q 'strconv.ParseUint(s, 10, 64)' common/utils.go && echo OK
-grep -q '"wss://"' common/defaults.go && echo OK
-grep -q "pnpm@" Dockerfile && echo OK
 grep -q "resolveRateLimiterRedisTarget" upstream/ratelimiter_registry.go && echo OK
 grep -q "common.CorroboratedHead(" health/tracker.go && echo OK
 grep -q "common.CorroboratedHead(" erpc/networks.go && echo OK
@@ -59,7 +57,7 @@ A rebase that reports success while a probe fails means the patch was dropped du
 conflict resolution. Recover it from the pre-rebase `main` in the reflog
 (`git reflog main`), not from a rewritten branch.
 
-Go patches also need `go test ./architecture/evm/... ./common/...` to pass — a patch
+Go patches also need `go test ./architecture/evm/... ./common/... ./health/... ./data/...` to pass — a patch
 can survive a rebase textually and still be defeated by upstream logic that moved
 around it.
 
@@ -69,13 +67,11 @@ around it.
 
 | Patch | Files | Probe |
 | -- | -- | -- |
-| `9ac29b2a` fix(evm): treat gas-limit rejections as terminal, not retryable (RHI-6277, #6) | `architecture/evm/gas_limit_errors.go`, `architecture/evm/gas_limit_errors_test.go`, `architecture/evm/error_normalizer.go` | `isTerminalGasLimitRejection` present in `error_normalizer.go` |
-| `9d91a08d` (part of "update prod config") base-10 EVM quantity tolerance | `common/utils.go` | `strconv.ParseUint(s, 10, 64)` in `common/utils.go` |
-| `9d91a08d` (part of "update prod config") treat `ws://`/`wss://` endpoints as providers | `common/defaults.go` | `"wss://"` in `common/defaults.go` |
-| `174471cd` fix(docker): pin pnpm to the packageManager version (#7) | `Dockerfile` | `pnpm@` in `Dockerfile` (i.e. a version, not bare `pnpm`) |
-| `38089810` fix(ratelimiter): parse rediss:// URI for the Redis store (RHI-6529, #9) | `upstream/ratelimiter_redis_target.go`, `upstream/ratelimiter_redis_target_test.go`, `upstream/ratelimiter_registry.go` | `resolveRateLimiterRedisTarget` called in `ratelimiter_registry.go` |
-| `5e597c39` fix(health): serve the fresher head when upstreams differ only by lag noise (RHI-8079, #12), plus `2000d223` fix(health): cap the corroborated head lead instead of dropping it (RHI-8079, #13) — fold into one commit at the next sync | `common/head_noise_tolerance.go` (+ `_test`), call sites in `health/tracker.go` (head + block-time sample) and `erpc/networks.go`; new tests in `health/`, `erpc/`, `internal/policy/`; updated expectations in `health/tracker_*_test.go`, `erpc/networks_test.go`, `erpc/networks_served_tip_test.go`, `erpc/networks_selection_policy_realpoll_test.go`; `docs/pages/reference/evm/block-tracking.mdx` | `common.CorroboratedHead(` called in both `health/tracker.go` and `erpc/networks.go` |
-| `4234412f` feat(evm): debounce the finalized poll on finality period, not block time (RHI-8113, #14) | `architecture/evm/evm_state_poller_finalized_debounce.go` (+ `_test`), call sites in `architecture/evm/evm_state_poller.go`, `docs/pages/reference/evm/block-tracking.mdx` | `pollFinalizedBlockNumberScheduled` called in `evm_state_poller.go` |
+| `23ac203b` fix(evm): treat gas-limit rejections as terminal, not retryable (RHI-6277, #6) | `architecture/evm/gas_limit_errors.go`, `architecture/evm/gas_limit_errors_test.go`, `architecture/evm/error_normalizer.go` | `isTerminalGasLimitRejection` present in `error_normalizer.go` |
+| `301093f3` (part of "update prod config") base-10 EVM quantity tolerance | `common/utils.go` | `strconv.ParseUint(s, 10, 64)` in `common/utils.go` |
+| `ade471ae` fix(ratelimiter): parse rediss:// URI for the Redis store (RHI-6529, #9) | `upstream/ratelimiter_redis_target.go`, `upstream/ratelimiter_redis_target_test.go`, `upstream/ratelimiter_registry.go` | `resolveRateLimiterRedisTarget` called in `ratelimiter_registry.go` |
+| `a503823d` fix(health): serve the corroborated head within lag noise, capped (RHI-8079, #12, #13) | `common/head_noise_tolerance.go` (+ `_test`), call sites in `health/tracker.go` (head + block-time sample) and `erpc/networks.go`; new tests in `health/`, `erpc/`, `internal/policy/`; updated expectations in `health/tracker_*_test.go`, `erpc/networks_test.go`, `erpc/networks_served_tip_test.go`, `erpc/networks_selection_policy_realpoll_test.go`; `docs/pages/reference/evm/block-tracking.mdx` | `common.CorroboratedHead(` called in both `health/tracker.go` and `erpc/networks.go` |
+| `61db4a8e` feat(evm): debounce the finalized poll on finality period, not block time (RHI-8113, #14) | `architecture/evm/evm_state_poller_finalized_debounce.go` (+ `_test`), call sites in `architecture/evm/evm_state_poller.go`, `docs/pages/reference/evm/block-tracking.mdx` | `pollFinalizedBlockNumberScheduled` called in `evm_state_poller.go` |
 
 **RHI-6277 — gas-limit rejections are terminal.** A rejection of the transaction's gas
 limit is classified `ErrEndpointExecutionException` and **not** marked retryable toward
@@ -95,21 +91,6 @@ contradict upstream #1094. If it lands upstream, delete this patch rather than c
 `error_normalizer.go` can conflict. It **must stay above** the `-32003` /
 `"out of gas"` branch — if a rebase moves it below, the tests fail rather than
 silently regressing.
-
-**pnpm pin.** `Dockerfile` installed pnpm unpinned (`npm install -g pnpm`), so the build
-took whatever version was newest that day. pnpm 11 verifies the package-manager identity
-against the lockfile and aborts with `ERR_PNPM_PNPM_ENGINE_IDENTITY_UNVERIFIABLE`, since
-`@pnpm/exe.<platform>` is absent from a `lockfileVersion: 9` file written by pnpm 10 — so
-every image build broke on a repo where nothing had changed. Now pinned to the version
-`package.json` already declares as `packageManager`; **the two must stay in step.** Also
-drops the duplicate install in `ts-dev`, which derives `FROM ts-core`.
-
-*Upstreamable:* yes, and it should go up — upstream `main` has the same unpinned install
-and the fix has no fork-specific content. Every other base image here is digest-pinned.
-
-*Rebase risk:* low, but note the probe only checks that a version is pinned at all. If
-upstream bumps `packageManager` in `package.json`, the pin must be bumped with it or
-`--frozen-lockfile` will fail on a version mismatch instead.
 
 **RHI-6529 — `rediss://` URI for the Redis rate-limiter store.** Upstream hands
 `rateLimiters.store.redis.uri` verbatim to envoyproxy/ratelimit's `NewClientImpl`, which
@@ -159,7 +140,9 @@ If it lands upstream, delete this patch.
 
 *Rebase risk:* low for the logic (its own file; a short block in `corroboratedNetworkHead`,
 the block-time sample line, and one line in `evmHeadReference`). The likely conflicts are
-the upstream test expectations we changed for 1–50 block gaps — keep ours.
+the upstream test expectations we changed for 1–50 block gaps — keep ours. 0.4.0 (#1208)
+rewrote the condition around the block-time sample line; the merge keeps upstream's condition
+(`>=`, and resample when the timestamp changes on the same head) and our reporter lookup.
 `TestCorroboratedHeadLeadTolerance_MatchesDefaultPolicyLagThreshold` fails if upstream
 moves the default policy's lag threshold; the new `*_head_noise_tolerance_test.go` files
 fail if either call site is dropped, and `TestTrackerHeadLeaderRunningAwayIsCappedNotDropped`
@@ -205,27 +188,22 @@ instead of `0x`-prefixed hex, which broke upstream health tracking. `HexToUint64
 
 *Upstreamable:* probably. Never proposed.
 
-**`ws://` / `wss://` endpoints.** `convertUpstreamToProvider` treated websocket endpoints
-as needing provider conversion; they don't.
-
-*Upstreamable:* probably. Never proposed.
-
 ### Config and CI
 
 | Patch | What |
 | -- | -- |
-| `9d91a08d` update prod config | `erpc-prod.yaml` — the production network/upstream config |
-| `35384bf7` Cleanup workflows | deletes upstream's CI (benchmark, codeql, dependency-review, release, scorecards, test, xray). We build an image from upstream code and trust it; upstream CI is noise, and `xray.yml` additionally wants secrets. **New upstream workflows do not conflict — they simply appear.** Check `.github/workflows/` after every sync: 0.3.0 added `xray.yml` and the rebase carried it in silently. |
-| `e3b15f16` Setup minimal CI | our own minimal workflow set |
-| `d8a76c5d` Add the upstream-sync script | `sync-with-upstream.sh` (its `promote-to-prod.sh` and `release.sh` were [removed](#removed-patches)) |
-| `cdcdb2fe` feat(ci): CodeBuild multi-arch images (RHI-5507, #4) | `buildspec-amd64.yml`, `buildspec-arm64.yml`, `.github/workflows/docker.yaml` |
-| `39a1fc61` ci: `workflow_dispatch` trigger (RHI-5509, #5) | `.github/workflows/docker.yaml` |
+| `301093f3` update prod config | `erpc-prod.yaml` — the production network/upstream config |
+| `0e618231` Cleanup workflows | deletes upstream's CI (benchmark, codeql, dependency-review, release, publish-npm, scorecards, test, xray). We build an image from upstream code and trust it; upstream CI is noise, and `xray.yml` additionally wants secrets. **New upstream workflows do not conflict — they simply appear.** Check `.github/workflows/` after every sync: 0.3.0 added `xray.yml` and the rebase carried it in silently; 0.4.0 added `publish-npm.yml` and modified `release.yml`, which stops the rebase on a modify/delete conflict — resolve by deleting. |
+| `974281fc` Setup minimal CI | our own minimal workflow set |
+| `11a80773` Add the upstream-sync script | `sync-with-upstream.sh` (its `promote-to-prod.sh` and `release.sh` were [removed](#removed-patches)) |
+| `cc65fa4e` feat(ci): CodeBuild multi-arch images (RHI-5507, #4) | `buildspec-amd64.yml`, `buildspec-arm64.yml`, `.github/workflows/docker.yaml` |
+| `6643c1ac` ci: `workflow_dispatch` trigger (RHI-5509, #5) | `.github/workflows/docker.yaml` |
 
 ### This file
 
 | Patch | Files | Probe |
 | -- | -- | -- |
-| `9ac29b2a` docs: the patch register itself (#6) | `PATCH_LIST.md`, `CLAUDE.md` | `test -f PATCH_LIST.md`, and `grep -q "This is a fork" CLAUDE.md` |
+| `23ac203b` docs: the patch register itself (#6) | `PATCH_LIST.md`, `CLAUDE.md` | `test -f PATCH_LIST.md`, and `grep -q "This is a fork" CLAUDE.md` |
 
 Listed because it is a fork-only file and can be dropped by a sync like any other patch —
 and losing it loses the ability to detect that anything else was dropped. `CLAUDE.md` is
@@ -233,6 +211,26 @@ upstream's file with our section appended, so a rebase may conflict there: keep 
 appended section and take upstream's version of the rest.
 
 ## Removed patches
+
+**`174471cd` fix(docker): pin pnpm to the packageManager version** (fork PR #7, merged
+2026-09-29, dropped at the 0.4.0 sync on 2026-10-12).
+
+Superseded: upstream #1184 (in 0.4.0) pins `pnpm@10.28.2` in the same place for the same
+reason and also drops the duplicate install in `ts-dev`. Our commit applied on top of it as a
+no-op diff, so it was dropped rather than carried. The constraint it documented still holds:
+the pin and `package.json`'s `packageManager` must stay in step, or `--frozen-lockfile` fails
+on a version mismatch. That is now upstream's problem to keep, and a sync that bumps one
+without the other shows up as a failed image build, not a silent regression.
+
+**`9d91a08d` (part) treat `ws://`/`wss://` endpoints as providers** (part of "update prod
+config", 2026-01-09, dropped at the 0.4.0 sync on 2026-10-12).
+
+Two lines in `convertUpstreamToProvider` exempting websocket endpoints from provider
+conversion. No config in any environment uses a `ws://` endpoint, and at 0.3.0 the exemption
+could not have produced a working upstream anyway — there was no websocket client behind it.
+Upstream `main` above 0.4.0 carries the identical lines as part of the WebSocket work
+(#836), so when the fork syncs past that tag the behaviour returns from upstream, with a
+client behind it.
 
 **`d8a76c5d` (part) the `release` branch as the production deploy path** — `promote-to-prod.sh`,
 `release.sh`, and the `release` entries in `.github/workflows/docker.yaml` (removed 2026-10-08).
