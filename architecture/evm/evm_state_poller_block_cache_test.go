@@ -139,3 +139,24 @@ func TestPollLatestBlock_NoCacheMeansNoWrite(t *testing.T) {
 	p.latestBlockShared.TryUpdate(t.Context(), 0) // no-op; just proves nothing panics without a network
 	assert.Zero(t, cache.count())
 }
+
+func TestPollFinalizedBlock_IsNotCachedByHash(t *testing.T) {
+	// The poller fetches a finalized block every tick too. Nothing reads it by
+	// hash, and the cache would file it under the unfinalized policy (the head
+	// it names is not stored yet when the write happens), so it must not be
+	// written at all. RHI-8260.
+	up := &blockServingUpstream{suggestGateUpstream: newSuggestGateUpstream(123, "0x7b", nil), body: []byte(blockCacheTestBody)}
+	p := newGateTestPoller(t, up)
+	cache := &recordingCache{}
+	p.SetBlockCache(blockCacheTestNetwork{}, cache)
+
+	n, err := p.PollFinalizedBlockNumber(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, int64(100), n)
+	assert.Zero(t, cache.count(), "a finalized-tag fetch must not be cached by hash")
+
+	// The latest fetch of the same block still is.
+	_, err = p.PollLatestBlockNumber(t.Context())
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return cache.count() == 1 }, 2*time.Second, 10*time.Millisecond)
+}
