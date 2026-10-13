@@ -47,6 +47,7 @@ grep -q "pollFinalizedBlockNumberScheduled" architecture/evm/evm_state_poller.go
 grep -q "BlockTimestamp" data/connector.go && echo OK
 grep -q "latestBlockShared.TryUpdateIfStale(" architecture/evm/evm_state_poller.go && echo OK
 grep -q "cacheBlockByHash(" architecture/evm/evm_state_poller.go && echo OK
+grep -B1 "cacheBlockByHash(" architecture/evm/evm_state_poller.go | grep -q 'blockTag == "latest"' && echo OK
 grep -q "hub.hashFor(" erpc/block_stream.go && echo OK
 grep -q "BlockHash" data/connector.go && echo OK
 test -f erpc-prod.yaml && echo OK
@@ -79,6 +80,7 @@ around it.
 | `61db4a8e` feat(evm): debounce the finalized poll on finality period, not block time (RHI-8113, #14) | `architecture/evm/evm_state_poller_finalized_debounce.go` (+ `_test`), call sites in `architecture/evm/evm_state_poller.go`, `docs/pages/reference/evm/block-tracking.mdx` | `pollFinalizedBlockNumberScheduled` called in `evm_state_poller.go` |
 | `0fcffa82` feat(data): carry the block timestamp through shared state; latest poll back on the shared clock (RHI-8244) | `data/shared_state_observation.go` (+ `_test`; was `shared_state_block_timestamp.go` until RHI-8178 generalised it), `architecture/evm/evm_state_poller_shared_clock_test.go`; signature changes in `data/connector.go`, `data/shared_state_variable.go`, call sites in `architecture/evm/evm_state_poller.go`, `architecture/svm/svm_state_poller.go`, `upstream/upstream.go`; `docs/pages/reference/evm/block-tracking.mdx` | `BlockTimestamp` in `data/connector.go`, and `latestBlockShared.TryUpdateIfStale(` (not `IfLocallyStale`) in `evm_state_poller.go` |
 | `39059069` feat(evm): cache the poller's block by hash and stream it by hash (RHI-8178) | `architecture/evm/evm_state_poller_block_cache.go` (+ `_test`), `data/shared_state_observation.go` (+ `_test`), hub + subscriber loop in `erpc/block_stream.go` (+ `_test`); call sites in `architecture/evm/evm_state_poller.go` (`fetchBlock`, `OnLatestBlock`), `erpc/projects_registry.go`, `data/connector.go`, `data/shared_state_variable.go`; signature adapters in `architecture/svm/svm_state_poller.go`, `upstream/upstream.go`; `docs/pages/reference/evm/block-tracking.mdx` | `cacheBlockByHash(` called in `evm_state_poller.go`, `hub.hashFor(` used in `erpc/block_stream.go`, `BlockHash` in `data/connector.go` |
+| `fc23439a` fix(evm): cache only the poller's latest fetch by hash, not the finalized one (RHI-8260, #17) — **fold into the RHI-8178 commit at the next sync** | one condition at the `cacheBlockByHash` call site in `architecture/evm/evm_state_poller.go`, `evm_state_poller_block_cache.go` comment, `TestPollFinalizedBlock_IsNotCachedByHash` | `if blockTag == "latest"` guards `cacheBlockByHash(` in `evm_state_poller.go` |
 
 **RHI-6277 — gas-limit rejections are terminal.** A rejection of the transaction's gas
 limit is classified `ErrEndpointExecutionException` and **not** marked retryable toward
@@ -229,9 +231,11 @@ poller fetches a full block (`eth_getBlockByNumber`, hashes-only) every tick and
 this patch, kept only the number: its request goes straight to the upstream, so nothing it
 observes ever reached the cache, and the `StreamBlocks` subscriber loop fetched the same
 block again by number. On a 1-block/s chain that duplicate was ~20 CU/s per chain, 70–85%
-of chain-indexer's idle overhead. The cache is the transport: `fetchBlock` writes the block
+of chain-indexer's idle overhead. The cache is the transport: `fetchBlock` writes the `latest` block
 into the network's JSON-RPC cache as the response to `eth_getBlockByHash(hash, false)`,
-synchronously, before the head is published; the shared head record carries the hash next
+synchronously, before the head is published (the `finalized`-tag fetch is not cached: nothing
+reads it by hash, and at write time it classifies as unfinalized because the head it names is
+not stored yet — RHI-8260, measured as a quarter of the by-hash writes on dev); the shared head record carries the hash next
 to the RHI-8244 timestamp (`CounterInt64Observation` replaces the `(value, timestamp)`
 pair, and the counter fills in or supersedes the block fields of a head it already holds);
 the hub records number → hash and the subscriber loop fetches a known block by hash through
