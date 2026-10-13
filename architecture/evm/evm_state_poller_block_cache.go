@@ -8,8 +8,8 @@ import (
 	"github.com/erpc/erpc/util"
 )
 
-// Fork patch RHI-8178: the block the poller fetched goes into the network's
-// JSON-RPC cache under its hash.
+// Fork patch RHI-8178: the latest block the poller fetched goes into the
+// network's JSON-RPC cache under its hash.
 //
 // The poller fetches a full block (eth_getBlockByNumber, hashes-only) on every
 // tick and, before this patch, kept only the number: its request goes straight
@@ -20,7 +20,11 @@ import (
 //
 // A by-hash entry is content-addressed, so caching it while the block is still
 // unfinalized is never wrong, unlike a by-number entry whose mapping changes on
-// reorg. The write happens synchronously, before the head is published through
+// reorg. Only the "latest" fetch is cached: nothing reads the finalized block
+// by hash, and at write time it would be classified unfinalized anyway, because
+// the finalized head it names is the one the poller is about to store (RHI-8260).
+//
+// The write happens synchronously, before the head is published through
 // shared state, so a subscriber that wakes on the new head finds the block in
 // the cache (shared Redis, any replica) rather than racing the write. Whether
 // anything is stored is the cache policy's call: this is an ordinary Set for

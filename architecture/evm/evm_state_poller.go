@@ -1362,7 +1362,12 @@ func (e *EvmStatePoller) fetchBlock(ctx context.Context, blockTag string) (fetch
 		blockTimestamp = 0
 	}
 
-	e.cacheBlockByHash(ctx, resp, blockHash)
+	// Only the tip is ever read back by hash (the stream, a reorg walk); the
+	// finalized-tag block would also be misclassified unfinalized here, since
+	// the finalized head it IS has not been stored yet (RHI-8260).
+	if blockTag == "latest" {
+		e.cacheBlockByHash(ctx, resp, blockHash)
+	}
 
 	return fetchedBlock{number: blockNum, timestamp: blockTimestamp, hash: blockHash}, nil
 }
