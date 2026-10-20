@@ -127,3 +127,26 @@ func TestShredLag_SkippedWhenTheProcessedSlotStaysTooOld(t *testing.T) {
 	require.True(t, p.IsHealthy())
 	require.Empty(t, up.cordons())
 }
+
+// A node whose replay has stalled keeps answering getSlot(processed) with the
+// same slot while shreds keep arriving. The counter fires no OnValue for an
+// unchanged slot, so the poller's own successful fetch must still count as
+// fresh, or the detector never sees the lag it exists to catch.
+func TestShredLag_StalledProcessedSlotStillCordons(t *testing.T) {
+	t.Parallel()
+	up := newScriptedUpstream()
+	scriptAllFour(up)
+	up.script("getSlot:processed", []byte(`1000`))
+	up.script("getMaxShredInsertSlot", []byte(`1200`))
+	p := newPollerWithUpstream(t, up)
+	p.SetDebounceInterval(30 * time.Second)
+
+	p.latestSlotShared.TryUpdate(t.Context(), 1000)
+	backdateLatestSlot(p, time.Minute) // the stall began long ago
+
+	require.NoError(t, p.Poll(context.Background()))
+	require.Equal(t, 1, up.callCount("getSlot:processed"))
+	require.Equal(t, int64(200), p.MaxShredInsertSlotLag())
+	require.False(t, p.IsHealthy())
+	require.Len(t, up.cordons(), 1)
+}

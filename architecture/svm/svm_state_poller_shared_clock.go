@@ -50,8 +50,9 @@ func slotPollFor(skips *int, externalAt int64, d time.Duration) slotPoll {
 	return slotShared
 }
 
-// slotFreshForLag reports whether the processed slot was accepted recently
-// enough to subtract from a shred sample taken now (see maxLagSampleAge).
+// slotFreshForLag reports whether the processed slot was accepted, or
+// re-confirmed by this replica's own fetch, recently enough to subtract from a
+// shred sample taken now (see maxLagSampleAge).
 func (e *SvmStatePoller) slotFreshForLag() bool {
 	at := e.latestSlotSeenAt.Load()
 	return at > 0 && time.Since(time.UnixMilli(at)) <= maxLagSampleAge
@@ -72,6 +73,7 @@ func (e *SvmStatePoller) slotFreshForLag() bool {
 func (e *SvmStatePoller) pollSlot(ctx context.Context, v data.CounterInt64SharedVariable, payload []byte, staleness time.Duration, force bool) {
 	if force {
 		if slot, err := e.fetchSlot(ctx, payload); err == nil && slot > 0 {
+			e.markSlotFetched(v)
 			v.TryUpdate(e.appCtx, slot)
 		}
 		return
@@ -82,6 +84,20 @@ func (e *SvmStatePoller) pollSlot(ctx context.Context, v data.CounterInt64Shared
 			// A zero would read as a whole-chain rollback; see processNewValue.
 			err = errNoSlotInResponse
 		}
+		if err == nil {
+			e.markSlotFetched(v)
+		}
 		return data.CounterInt64Observation{Value: slot}, err
 	})
+}
+
+// markSlotFetched stamps the processed slot fresh for lag on a successful
+// fetch. OnValue alone is not enough: the counter fires no callback when a
+// fetch returns the slot it already holds, which is exactly what a node whose
+// replay has stalled returns, so the stall would otherwise blind the
+// shred-lag detector it exists to trip.
+func (e *SvmStatePoller) markSlotFetched(v data.CounterInt64SharedVariable) {
+	if v == e.latestSlotShared {
+		e.latestSlotSeenAt.Store(time.Now().UnixMilli())
+	}
 }
