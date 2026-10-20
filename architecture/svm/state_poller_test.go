@@ -424,10 +424,9 @@ func TestSvmStatePoller_Poll_TrafficGate_SkipsGetSlotWhenBothViewsFresh(t *testi
 	}
 }
 
-// TestSvmStatePoller_Poll_TrafficGate_PartialFreshnessStillPollsSlots: one
-// fresh view does not open the traffic gate, so the stale view is still
-// fetched. The fresh view itself is not: its counter's shared clock already
-// holds a slot from inside the window (see pollSlot).
+// TestSvmStatePoller_Poll_TrafficGate_PartialFreshnessStillPollsSlots: the
+// traffic gate is per view, so one fresh view skips only its own getSlot and
+// the stale view is still fetched.
 func TestSvmStatePoller_Poll_TrafficGate_PartialFreshnessStillPollsSlots(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

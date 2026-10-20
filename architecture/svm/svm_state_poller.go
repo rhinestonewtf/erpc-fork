@@ -102,14 +102,19 @@ type SvmStatePoller struct {
 	// lastExternalLatestAt / lastExternalFinalizedAt stamp (UnixMilli) the most
 	// recent EXTERNAL slot observation (live-traffic context.slot harvest or
 	// shared-state suggestion) per commitment view. The poll loop uses them as
-	// the traffic gate: when both views are fresher than the debounce window,
-	// the two getSlot calls are skipped. Only the public Suggest* entry points
+	// the traffic gate: a view fresher than the debounce window skips its
+	// getSlot. Only the public Suggest* entry points
 	// stamp these — the poller's own fetches write the counters directly
 	// (pollSlot), so a poll can never satisfy its own gate.
 	lastExternalLatestAt    atomic.Int64
 	lastExternalFinalizedAt atomic.Int64
-	// slotPollSkips counts consecutive traffic-gated skips; guarded by pollMu.
-	slotPollSkips int
+	// latestSlotSkips / finalizedSlotSkips count consecutive traffic-gated
+	// skips per view; guarded by pollMu.
+	latestSlotSkips    int
+	finalizedSlotSkips int
+	// latestSlotSeenAt stamps (UnixMilli) when the processed counter last
+	// accepted a value, from any source; see slotFreshForLag.
+	latestSlotSeenAt atomic.Int64
 	// pollCount counts polls that passed the debounce gate. Guarded by pollMu.
 	pollCount int
 	// nextHealthPoll is the pollCount at which getHealth runs again. Starts at 0
@@ -162,6 +167,9 @@ func NewSvmStatePoller(
 		latestSlotShared:    latestShared,
 		finalizedSlotShared: finalizedShared,
 	}
+	latestShared.OnValue(func(data.CounterInt64Observation) {
+		e.latestSlotSeenAt.Store(time.Now().UnixMilli())
+	})
 
 	// Counter callbacks, mirroring EvmStatePoller (evm_state_poller.go:157-171).
 	// OnValue is the ONLY tracker feed for slots: it fires once per ACCEPTED
@@ -284,13 +292,13 @@ func (e *SvmStatePoller) loop(interval time.Duration) {
 // goroutine races against the getSlot goroutine and reads a stale (or zero)
 // latest slot.
 //
-// Traffic gate: when live traffic has refreshed BOTH the latest and finalized
-// slot views within the debounce window (via SuggestLatestSlot /
-// SuggestFinalizedSlot, fed by upstreamPostForward_trackContextSlot), the two
-// getSlot calls are skipped this tick — traffic already proved slot freshness,
-// and on paid vendor RPCs the poller is the dominant background cost.
-// Bounded by maxConsecutiveSlotPollSkips so suggestions can never fully
-// replace the poller's own observations.
+// Traffic gate, per view: when live traffic has refreshed a slot view within
+// the debounce window (via SuggestLatestSlot / SuggestFinalizedSlot, fed by
+// upstreamPostForward_trackContextSlot), that view's getSlot is skipped this
+// tick — traffic already proved its freshness, and on paid vendor RPCs the
+// poller is the dominant background cost. Bounded per view by
+// maxConsecutiveSlotPollSkips so suggestions can never fully replace the
+// poller's own observations (see slotPollFor).
 //
 // getMaxShredInsertSlot always runs: traffic carries no such signal, and the
 // watermark advances at chain rate, so a throttled snapshot would go stale
@@ -312,24 +320,10 @@ func (e *SvmStatePoller) Poll(ctx context.Context) error {
 		}
 	}
 
-	skipSlots := false
-	if d > 0 && e.slotPollSkips < maxConsecutiveSlotPollSkips {
-		nowMs := time.Now().UnixMilli()
-		window := d.Milliseconds()
-		latestAt := e.lastExternalLatestAt.Load()
-		finalizedAt := e.lastExternalFinalizedAt.Load()
-		if window > 0 &&
-			latestAt > 0 && nowMs-latestAt < window &&
-			finalizedAt > 0 && nowMs-finalizedAt < window {
-			skipSlots = true
-		}
-	}
-	forceSlots := false
-	if skipSlots {
-		e.slotPollSkips++
-	} else {
-		forceSlots = e.slotPollSkips >= maxConsecutiveSlotPollSkips
-		e.slotPollSkips = 0
+	latestPoll := slotPollFor(&e.latestSlotSkips, e.lastExternalLatestAt.Load(), d)
+	finalizedPoll := slotPollFor(&e.finalizedSlotSkips, e.lastExternalFinalizedAt.Load(), d)
+	if !e.slotFreshForLag() {
+		latestPoll = slotForce
 	}
 
 	// getHealth carries a near-static boolean and feeds only the cordon edge, so
@@ -357,18 +351,20 @@ func (e *SvmStatePoller) Poll(ctx context.Context) error {
 		}()
 	}
 
-	if !skipSlots {
-		wg.Add(2)
+	if latestPoll != slotSkip {
+		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer e.recoverPanic("fetchSlot.processed")
-			e.pollSlot(ctx, e.latestSlotShared, reqGetSlotProcessed, d, forceSlots)
+			e.pollSlot(ctx, e.latestSlotShared, reqGetSlotProcessed, d, latestPoll == slotForce)
 		}()
-
+	}
+	if finalizedPoll != slotSkip {
+		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer e.recoverPanic("fetchSlot.finalized")
-			e.pollSlot(ctx, e.finalizedSlotShared, reqGetSlotFinalized, d, forceSlots)
+			e.pollSlot(ctx, e.finalizedSlotShared, reqGetSlotFinalized, d, finalizedPoll == slotForce)
 		}()
 	}
 
@@ -383,13 +379,13 @@ func (e *SvmStatePoller) Poll(ctx context.Context) error {
 
 	wg.Wait()
 
-	// The processed-slot goroutine has joined, but LatestSlot() may still be up
-	// to one debounce old: a peer's fetch, traffic, or a fetch slower than the
-	// shared state's updateMaxWait that lands asynchronously. At most
-	// debounce/400ms slots, far inside MaxShredInsertSlotLagThreshold.
+	// The processed-slot goroutine has joined, but on the shared clock its
+	// value can still predate this tick (a peer's fetch, traffic, or a fetch
+	// slower than updateMaxWait landing asynchronously). slotFreshForLag bounds
+	// that age; past it the lag is left as it was rather than inflated.
 	if shredSlot > 0 {
 		e.shredInsertSlot.Store(shredSlot)
-		if latest := e.LatestSlot(); latest > 0 {
+		if latest := e.LatestSlot(); latest > 0 && e.slotFreshForLag() {
 			// getMaxShredInsertSlot is the BLOCKSTORE-INGESTION watermark and is
 			// structurally >= the replayed (processed) slot, so ingestion lag is
 			// `maxShredInsertSlot - processedSlot` (DESIGN-MULTI-CHAIN-SOLANA.md §9.2).
