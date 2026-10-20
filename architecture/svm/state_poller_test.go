@@ -425,16 +425,18 @@ func TestSvmStatePoller_Poll_TrafficGate_SkipsGetSlotWhenBothViewsFresh(t *testi
 }
 
 // TestSvmStatePoller_Poll_TrafficGate_PartialFreshnessStillPollsSlots: one
-// fresh view is not freshness — the gate requires BOTH latest and finalized
-// observations within the window, else Poll fans out all four calls.
+// fresh view does not open the traffic gate, so the stale view is still
+// fetched. The fresh view itself is not: its counter's shared clock already
+// holds a slot from inside the window (see pollSlot).
 func TestSvmStatePoller_Poll_TrafficGate_PartialFreshnessStillPollsSlots(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name    string
 		suggest func(*SvmStatePoller)
+		fresh   string
 	}{
-		{"only latest fresh", func(p *SvmStatePoller) { p.SuggestLatestSlot(1500) }},
-		{"only finalized fresh", func(p *SvmStatePoller) { p.SuggestFinalizedSlot(1490) }},
+		{"only latest fresh", func(p *SvmStatePoller) { p.SuggestLatestSlot(1500) }, "getSlot:processed"},
+		{"only finalized fresh", func(p *SvmStatePoller) { p.SuggestFinalizedSlot(1490) }, "getSlot:finalized"},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -449,8 +451,12 @@ func TestSvmStatePoller_Poll_TrafficGate_PartialFreshnessStillPollsSlots(t *test
 			require.NoError(t, p.Poll(context.Background()))
 
 			for _, key := range []string{"getHealth", "getSlot:processed", "getSlot:finalized", "getMaxShredInsertSlot"} {
-				if got := up.callCount(key); got != 1 {
-					t.Errorf("%s called %d times, want 1 (one fresh view must not gate)", key, got)
+				want := 1
+				if key == tc.fresh {
+					want = 0
+				}
+				if got := up.callCount(key); got != want {
+					t.Errorf("%s called %d times, want %d (one fresh view must not gate the other)", key, got, want)
 				}
 			}
 		})
