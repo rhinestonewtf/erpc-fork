@@ -61,7 +61,7 @@ capture heap and CPU profiles to investigate high memory usage. Work with my exi
 
 ### How it works
 
-**Image structure.** The Dockerfile uses six named build stages: `go-builder` compiles both `erpc-server` (production) and `erpc-server-pprof` (pprof build tag); `ts-core` installs shared pnpm dependencies on Node 20 alpine; `ts-dev` and `ts-prod` extend `ts-core` for their respective build targets; `symlink` creates a `/root/erpc-server → /erpc-server` compatibility symlink; `final` copies only the two Go binaries, the symlink, and compiled TypeScript files into a `gcr.io/distroless/static-debian12:nonroot` base. CGO is disabled and `-ldflags="-w -s"` strips debug info. The default `CMD` is `/erpc-server`.
+**Image structure.** The Dockerfile uses six named build stages: `go-builder` compiles both `erpc-server` (production) and `erpc-server-pprof` (pprof build tag), and `scripts/check-go-toolchain.sh` fails the build unless the toolchain is go1.26.10+ or go1.27.3+ (the releases with the eMudhra `crypto/x509` distrust list); `ts-core` installs shared pnpm dependencies on Node 24 alpine (build time only, Node is not in the final image); `ts-dev` and `ts-prod` extend `ts-core` for their respective build targets; `symlink` creates a `/root/erpc-server → /erpc-server` compatibility symlink; `final` copies only the two Go binaries, the symlink, and compiled TypeScript files into a `gcr.io/distroless/static-debian12:nonroot` base. CGO is disabled and `-ldflags="-w -s"` strips debug info. The default `CMD` is `/erpc-server`.
 
 **Ports.** The image exposes three ports:
 - `4000` — JSON-RPC HTTP ingress (default `server.httpPortV4`)
