@@ -17,6 +17,7 @@ import (
 	"github.com/erpc/erpc/architecture/evm"
 	"github.com/erpc/erpc/architecture/svm"
 	"github.com/erpc/erpc/common"
+	"github.com/erpc/erpc/execdiag"
 	"github.com/erpc/erpc/health"
 	"github.com/erpc/erpc/internal/policy"
 	"github.com/erpc/erpc/telemetry"
@@ -1825,7 +1826,7 @@ func (n *Network) getFailsafeExecutor(ctx context.Context, req *common.Normalize
 	return nil
 }
 
-func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
+func (n *Network) forward(ctx context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 	startTime := time.Now()
 	req.SetNetwork(n)
 	req.SetCacheDal(n.cacheDal)
@@ -2802,7 +2803,9 @@ func (n *Network) doForward(execSpanCtx context.Context, u common.Upstream, req 
 	}
 
 	// If not handled, then fallback to the normal forward
-	resp, err := u.Forward(execSpanCtx, req, false, isHedgeAttempt)
+	ectx, uc := execdiag.BeginUpstreamCall(execSpanCtx, req, u, isHedgeAttempt)
+	resp, err := u.Forward(ectx, req, false, isHedgeAttempt)
+	uc.End(resp, err)
 	if h != nil {
 		return h.HandleUpstreamPostForward(execSpanCtx, n, u, req, resp, err, skipCacheRead)
 	}
@@ -2893,6 +2896,7 @@ func (n *Network) handleBlockSkip(
 	if !isRetryable {
 		errToStore = common.NewErrUpstreamRequestSkipped(skipErr, u.Id())
 	}
+	execdiag.RecordLocal(ctx, req, u.Id(), u.VendorName(), false, errToStore, "", "")
 	req.MarkUpstreamCompleted(ctx, u, nil, errToStore)
 
 	// When the block is slightly ahead (retryable), trigger an async poll so the
@@ -3159,6 +3163,7 @@ func (n *Network) handleMultiplexing(ctx context.Context, lg *zerolog.Logger, re
 	// Loop handles the edge case where we find a closed multiplexer during cleanup.
 	for {
 		mlx := NewMultiplexer(mlxHash)
+		mlx.diagScope = execdiag.ScopeFromContext(ctx)
 		vinf, loaded := n.inFlightRequests.LoadOrStore(mlxHash, mlx)
 
 		if !loaded {
@@ -3181,6 +3186,7 @@ func (n *Network) handleMultiplexing(ctx context.Context, lg *zerolog.Logger, re
 
 		inf.copyWg.Add(1)
 		inf.mu.Unlock()
+		execdiag.MarkFollower(ctx, inf.diagScope)
 
 		method, _ := req.Method()
 		finality := req.Finality(ctx)

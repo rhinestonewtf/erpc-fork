@@ -50,6 +50,8 @@ type Config struct {
 	ProxyPools   []*ProxyPoolConfig `yaml:"proxyPools,omitempty" json:"proxyPools"`
 	Tracing      *TracingConfig     `yaml:"tracing,omitempty" json:"tracing"`
 
+	ExecutionDiagnostics *ExecutionDiagnosticsConfig `yaml:"executionDiagnostics,omitempty" json:"executionDiagnostics"`
+
 	// UserScript is the compiled program of the user's TS/JS config file
 	// (the WHOLE thing — imports, helpers, the createConfig call). Set
 	// by `loadConfigFromTypescript`; nil for YAML configs.

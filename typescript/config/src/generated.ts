@@ -224,6 +224,7 @@ export interface Config {
   metrics?: MetricsConfig;
   proxyPools?: (ProxyPoolConfig | undefined)[];
   tracing?: TracingConfig;
+  executionDiagnostics?: ExecutionDiagnosticsConfig;
 }
 export interface ServerConfig {
   listenV4?: boolean;
@@ -2088,6 +2089,25 @@ export interface RateLimitStoreConfig {
   redis?: RedisConnectorConfig;
   cacheKeyPrefix?: string;
   nearLimitRatio?: number /* float32 */;
+}
+
+//////////
+// source: config_execution_diagnostics.go
+
+export const DefaultExecutionDiagnosticsMaxEventsPerSecond = 10;
+export const DefaultExecutionDiagnosticsBurst = 100;
+export const DefaultExecutionDiagnosticsMaxAttemptEventsPerRequest = 8;
+/**
+ * ExecutionDiagnosticsConfig controls the payload-free execution diagnostics
+ * log stream (per-request upstream invocation evidence and breaker
+ * transitions). The stream is independent of logLevel; its volume is bounded
+ * per replica by a token bucket counted in log lines.
+ */
+export interface ExecutionDiagnosticsConfig {
+  enabled?: boolean;
+  maxEventsPerSecond?: number /* float64 */;
+  burst?: number /* int */;
+  maxAttemptEventsPerRequest?: number /* int */;
 }
 
 //////////

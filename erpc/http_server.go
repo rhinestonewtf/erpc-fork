@@ -23,6 +23,7 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/erpc/erpc/auth"
 	"github.com/erpc/erpc/common"
+	"github.com/erpc/erpc/execdiag"
 	"github.com/erpc/erpc/telemetry"
 	"github.com/erpc/erpc/util"
 	"github.com/klauspost/compress/gzip"
@@ -323,6 +324,9 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 		// Set network in context for force-trace matching in child spans (uses existing parsed values)
 		if !isAdmin && !isHealthCheck && architecture != "" && chainId != "" {
 			httpCtx = common.SetForceTraceNetwork(httpCtx, architecture+":"+chainId)
+		}
+		if !isAdmin && !isHealthCheck && execdiag.Enabled() {
+			httpCtx = execdiag.WithInboundTraceContext(httpCtx, r.Header)
 		}
 
 		if isHealthCheck {

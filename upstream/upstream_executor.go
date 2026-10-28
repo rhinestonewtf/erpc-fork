@@ -368,9 +368,12 @@ func (e *upstreamExecutor) callBreakerWithTimeout(
 	if e.breaker != nil && upstreamBreakerEligible(req, isHedge) {
 		if !e.breaker.TryAcquirePermit() {
 			startTime := time.Now()
-			return nil, common.NewErrFailsafeCircuitBreakerOpen(common.ScopeUpstream, failsafe.ErrCircuitOpen, &startTime)
+			err := common.NewErrFailsafeCircuitBreakerOpen(common.ScopeUpstream, failsafe.ErrCircuitOpen, &startTime)
+			recordBreakerRejection(ctx, req, e, isHedge, err)
+			return nil, err
 		}
 	}
+	ctx = withBreakerAdmission(ctx, req, e, isHedge)
 
 	resp, err := e.callWithTimeout(ctx, req, inner, isHedge)
 

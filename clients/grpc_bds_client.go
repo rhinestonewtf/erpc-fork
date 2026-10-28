@@ -256,6 +256,7 @@ func (c *GenericGrpcBdsClient) GetType() ClientType {
 }
 
 func (c *GenericGrpcBdsClient) SendRequest(ctx context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
+	common.MarkDispatchObserved(ctx)
 	// Hard per-call ceiling. FIRST line of defense — bounds the worst case
 	// for wedged H2 streams independent of caller-supplied deadlines.
 	// The cause is OUR private sentinel (not the shared failsafe one) so

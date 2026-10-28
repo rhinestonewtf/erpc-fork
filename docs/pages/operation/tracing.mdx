@@ -50,6 +50,33 @@ Illustrative, not a tuned production config — 10 % sampling, gRPC export:
 }`}
 />
 
+## Execution diagnostics
+
+Separately from tracing and `logLevel`, eRPC writes a compact, payload-free log stream that
+explains how each troubled request was executed: which upstreams were actually contacted,
+which were refused locally (for example by an open circuit breaker), and how the request
+finally ended. It is on by default, bounded per replica, and never contains params, bodies,
+headers, endpoints or error messages.
+
+<ConfigTabs
+  path="executionDiagnostics"
+  focusYaml="2-6"
+  focusTs="2-6"
+  yaml={`executionDiagnostics:
+  enabled: true
+  # per replica, separate buckets for request evidence and breaker transitions
+  maxEventsPerSecond: 10
+  burst: 100
+  maxAttemptEventsPerRequest: 8`}
+  ts={`executionDiagnostics: {
+  enabled: true,
+  // per replica, separate buckets for request evidence and breaker transitions
+  maxEventsPerSecond: 10,
+  burst: 100,
+  maxAttemptEventsPerRequest: 8,
+}`}
+/>
+
 ## Agent reference
 
 Copy one of these prompts into your AI agent session (Claude Code, Cursor, …) — each one
@@ -280,6 +307,17 @@ Full struct: <SourceLink file="common/config.go" lines="218-235" />.
 matcher, both must match (AND). If only one field is set, only that field is checked. An
 empty matcher (neither field) never matches (<SourceLink file="common/tracing_core.go" lines="306-330" />).
 
+#### `executionDiagnostics.*`
+
+Full struct and defaults: <SourceLink file="common/config_execution_diagnostics.go" lines="9-43" />. The block is created with defaults when omitted (<SourceLink file="common/defaults.go" lines="73-76" />). Unknown keys are rejected by the strict YAML parser.
+
+| Field | Type | Default | Behavior / footguns |
+|---|---|---|---|
+| `executionDiagnostics.enabled` | bool | `true` | `false` disables everything: no per-request ledger, no events. |
+| `executionDiagnostics.maxEventsPerSecond` | float64 | `10` | Token-bucket refill rate **in log lines**, per replica. Request evidence and breaker transitions each get their own bucket with this rate. Must be `> 0`. |
+| `executionDiagnostics.burst` | int | `100` (raised to `1 + maxAttemptEventsPerRequest` when that is larger) | Bucket size in log lines. Must be `>= 1 + maxAttemptEventsPerRequest` so one full request always fits. |
+| `executionDiagnostics.maxAttemptEventsPerRequest` | int | `8` | Cap on `rpc.attempt.completed` lines per request. Must be `>= 1`. Omitted attempts are counted in `attempts_omitted`. |
+
 #### Standard `OTEL_*` environment variables
 
 | Env var | Interaction with eRPC config |
@@ -486,6 +524,32 @@ are recorded. Use `sampleRate: 0.0000001` because `sampleRate: 0` is rewritten t
     logged, even if you lower the level later via the admin API. Source: <SourceLink file="common/tracing_core.go" lines="119-122" />
 13. **`console.error` in TypeScript config scripts throws `TypeError`.** Only `debug`,
     `info`, `log`, `trace`, and `warn` are registered in the Sobek runtime. Source: <SourceLink file="common/console.go" lines="15-21" />
+14. **The `LOG_LEVEL` env var is a process-wide floor that also filters execution
+    diagnostics.** The stream ignores `logLevel`, but `LOG_LEVEL=warn` drops its `info` events
+    and `LOG_LEVEL=error` drops all of them. eRPC logs one `error` line at startup when this
+    happens. Source: <SourceLink file="execdiag/config.go" />
+15. **`dispatch=attempted` does not prove the provider received the request.** It means the
+    client reached network I/O; a transport failure after that point may or may not have
+    reached the provider.
+16. **`dispatch=unknown`** marks invocations whose transport client does not report dispatch.
+    It is never shown as `none`.
+17. **Hedge losers may still be running when the winner returns.** Emission waits up to 1s
+    for them; anything still running is counted in `invocations_inflight` and the summary
+    has `evidence_complete=false`.
+18. **Budget suppression is never silent.** Dropped requests and lines are reported in
+    `rpc.diagnostics.suppressed` (at most every 10s, plus a final flush on shutdown).
+19. **Upstreams without an explicit `id` derive one from the endpoint host**, which then
+    appears in diagnostics (and metrics). Set explicit ids for upstreams whose host carries
+    a secret.
+20. **An inbound `traceparent` is recorded but never propagated when tracing is off.** It
+    appears as `trace_id` + `parent_span_id` in diagnostics only; it is not made the active
+    span and not forwarded to providers.
+21. **Logical attempts are not dispatches, and transition counters are not current state.**
+    `logical_attempts` counts executor attempts (including breaker rejections);
+    `dispatches` counts invocations that reached network I/O. Breaker state is per replica,
+    per upstream, per failsafe entry (`breaker_scope`).
+22. **Out of scope:** requests rejected before network forwarding (auth, project rate
+    limits), internal requests (state pollers, probes) and cache-connector breakers.
 
 ### Observability
 
@@ -648,6 +712,53 @@ only when `tracing.enabled && tracing.detailed`; "direct" = calls `tracer.Start`
 
 </details>
 
+### Execution diagnostics events
+
+Every event is one JSON log line with `component="execution-diagnostics"`, `event`, `message`,
+`version`, `commit`, `replica` (`POD_NAME`, else hostname) and `project`. Events never carry
+`service` or `name` keys, error messages, error details, URLs, hosts, headers, params,
+results or the caller's JSON-RPC id. Method and user id are passed through only when they
+match `^[A-Za-z0-9_.:\-]{1,64}$`, otherwise they read `invalid`.
+
+**Emission rule.** A request emits only when it is notable: its final error is not a valid
+application error (revert etc.), or any invocation has a notable class (`timeout`,
+`rejected`, `transport_failure`, `provider_error`, `unclassified`) — including requests
+that later recovered. Hedge losers, catch-up retries, eligibility skips and reverts alone
+emit nothing. An emitted request includes all of its invocations, capped by
+`maxAttemptEventsPerRequest` (winner first, then notable ones, then the rest).
+
+| Event | Level | Fields |
+|---|---|---|
+| `rpc.request.completed` | `warn` when `outcome` is `failed`/`rejected`, else `info` | `operational_request_id` (32 hex, per request), `parent_request_id` (sub-requests), `leader_request_id` (multiplexed followers), `trace_id` + `span_id` (eRPC span) or `trace_id` + `parent_span_id` (inbound `traceparent`), `network`, `rpc_method`, `finality`, `user_id`, `path` (`forward`/`cache_hit`/`multiplexed_follower`), `outcome` (`degraded`/`rejected`/`cancelled`/`failed`), `final_class`, `final_error_code`, `final_cause`, `duration_ms`, `invocations`, `dispatches`, `dispatch_unknown`, `logical_attempts`, `network_attempts`, `retries`, `hedges`, `consensus_slots`, `subrequests`, `class_counts`, `attempts_emitted`, `attempts_omitted`, `invocations_inflight`, `evidence_complete` |
+| `rpc.attempt.completed` | `warn` when the class is notable, else `info` | `operational_request_id`, `trace_id`, `attempt_no` (by start time), `upstream_id`, `vendor`, `network`, `rpc_method`, `finality`, `dispatch` (`attempted`/`none`/`unknown`), `class`, `outcome` (`success`/`degraded`/`rejected`/`skipped`/`failed`/`cancelled`), `cause`, `http_status`, `jsonrpc_code`, `selection_reason`, `hedge`, `retry`, `network_attempt`, `breaker_state` (`closed`/`half_open`/`open`/`none`/`bypassed`), `breaker_scope`, `won`, `started_offset_ms`, `duration_ms` |
+| `rpc.breaker.transition` | `warn` when `to=open`, else `info` | `network`, `upstream_id`, `vendor`, `breaker_scope`, `from`, `to`, `reason`. No request id: transitions are asynchronous. |
+| `rpc.diagnostics.suppressed` | `warn` | `window_ms`, `requests_suppressed`, `request_events_suppressed` (lines), `transitions_suppressed` |
+| `rpc.diagnostics.configured` | `info` | `max_events_per_second`, `burst`, `max_attempt_events_per_request` (once at startup) |
+
+**Classification** (first match wins; one function for invocations and the final error):
+
+| # | Matches | `class` | Notable |
+|---|---|---|---|
+| 0 | no error | `result` | no |
+| 1 | `ErrEndpointRequestCanceled`, `ErrUpstreamHedgeCancelled`, `context.Canceled` | `cancelled` | no |
+| 2 | `ErrFailsafeTimeoutExceeded`, `ErrEndpointRequestTimeout`, `ErrNetworkRequestTimeout`, dynamic timeout, `context.DeadlineExceeded` | `timeout` | yes |
+| 3 | `ErrFailsafeCircuitBreakerOpen`, upstream/network/project/auth rate-limit errors, `ErrNoUpstreamsLeftToSelect`, `ErrNoUpstreamsFound` | `rejected` | yes |
+| 4 | `ErrUpstreamRequestSkipped`, method ignored, block unavailable, syncing, shadowing, excluded by policy, not allowed, node-type mismatch | `skipped` | no |
+| 5 | invocation with `dispatch=none` and any other error | `rejected` | yes |
+| 6 | execution exception (revert), client-side, nonce, request too large, `ErrGetLogsExceeded*`, invalid request | `application_error` | no |
+| 7 | `ErrEndpointMissingData` | `data_unavailable` | no |
+| 8 | `ErrEndpointTransportFailure` | `transport_failure` | yes |
+| 9 | server-side, capacity, unauthorized, billing, unsupported, content validation, chain-id mismatch, malformed response, `ErrJsonRpcExceptionInternal` | `provider_error` | yes |
+| 10 | anything else | `unclassified` | yes |
+
+For a final error that joins several upstream errors, each leaf is classified separately:
+distinct classes give `final_class=mixed` and distinct causes give `final_cause=multiple`.
+`cause` is the first eRPC error code in the chain that is not a wrapper
+(`ErrUpstreamRequest`, `ErrFailsafeRetryExceeded`, `ErrUpstreamsExhausted`), or
+`unknown_error`. Source: <SourceLink file="execdiag/classify.go" />
+
+Example Loki query: `{app="erpc"} | json | component="execution-diagnostics"`.
+
 ### Source code entry points
 
 - [`common/tracing_core.go:L53-L170`](https://github.com/erpc/erpc/blob/main/common/tracing_core.go#L53-L170) — `InitializeTracing`: exporter creation, sampler construction, propagator setup, `forceTraceSampler`, `IsTracingEnabled`/`IsTracingDetailed` globals
@@ -663,6 +774,8 @@ only when `tracing.enabled && tracing.detailed`; "direct" = calls `tracer.Start`
 - [`erpc/init.go:L27-L42`](https://github.com/erpc/erpc/blob/main/erpc/init.go#L27-L42) — parses `cfg.LogLevel` into zerolog level; logs full redacted config at info level
 - [`common/console.go:L15-L29`](https://github.com/erpc/erpc/blob/main/common/console.go#L15-L29) — JS/TS `console.{debug,info,log,trace,warn}` → zerolog bridge (note: `console.error` is absent)
 - [`common/runtime.go:L39`](https://github.com/erpc/erpc/blob/main/common/runtime.go#L39) — installs `console` object into every Sobek runtime
+- [`execdiag/`](https://github.com/erpc/erpc/blob/main/execdiag) — execution diagnostics: classifier, request/invocation scopes, budgeted emitter, breaker transition events
+- [`common/exec_invocations.go`](https://github.com/erpc/erpc/blob/main/common/exec_invocations.go) / [`common/dispatch_probe.go`](https://github.com/erpc/erpc/blob/main/common/dispatch_probe.go) — per-request invocation ledger and the dispatch probe set by transport clients
 - [`cmd/erpc/initflags.go`](https://github.com/erpc/erpc/blob/main/cmd/erpc/initflags.go) — `ERPC_NOLOGS=1` → zerolog.Disabled + io.Discard writer (build-tagged, non-test only)
 
 ### Related pages

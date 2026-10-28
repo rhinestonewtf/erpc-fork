@@ -152,6 +152,7 @@ func (c *GenericHttpJsonRpcClient) GetType() ClientType {
 }
 
 func (c *GenericHttpJsonRpcClient) SendRequest(ctx context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
+	common.MarkDispatchObserved(ctx)
 	if !c.supportsBatch {
 		return c.sendSingleRequest(ctx, req)
 	}
@@ -432,6 +433,9 @@ func (c *GenericHttpJsonRpcClient) processBatch(alreadyLocked bool) {
 
 	c.logger.Debug().Str("host", c.Url.Host).RawJSON("request", requestBody).Interface("headers", httpReq.Header).Msgf("sending json rpc POST request (batch)")
 
+	for _, br := range requests {
+		common.MarkDispatchAttempted(br.ctx)
+	}
 	// pick the client from the proxy pool registry (if configured) or fallback
 	resp, err := c.getHttpClient().Do(httpReq)
 	if err != nil {
@@ -735,6 +739,7 @@ func (c *GenericHttpJsonRpcClient) sendSingleRequest(ctx context.Context, req *c
 
 	c.logger.Debug().Str("host", c.Url.Host).RawJSON("request", requestBody).Interface("headers", httpReq.Header).Msg("sending json rpc POST request (single)")
 
+	common.MarkDispatchAttempted(ctx)
 	resp, err := c.getHttpClient().Do(httpReq)
 	if err != nil {
 		cause := effectiveCause(ctx)
