@@ -50,8 +50,8 @@ type TestingT interface {
 }
 
 // ConfigureForTest installs an emitter writing JSON lines to the returned
-// buffer, lowering the zerolog global floor to info so events are not
-// filtered, and restores both when the test ends.
+// buffer under an error-level zerolog global floor (the strictest one the
+// stream must survive), and restores both when the test ends.
 func ConfigureForTest(t TestingT, cfg *common.ExecutionDiagnosticsConfig) *CaptureBuffer {
 	t.Helper()
 	return configureForTest(t, cfg, time.Now)
@@ -65,9 +65,7 @@ func configureForTest(t TestingT, cfg *common.ExecutionDiagnosticsConfig, now fu
 	eff.SetDefaults()
 
 	prevLevel := zerolog.GlobalLevel()
-	if prevLevel > zerolog.InfoLevel {
-		zerolog.SetGlobalLevel(zerolog.InfoLevel)
-	}
+	zerolog.SetGlobalLevel(zerolog.ErrorLevel)
 	stopActive()
 
 	buf := &CaptureBuffer{}

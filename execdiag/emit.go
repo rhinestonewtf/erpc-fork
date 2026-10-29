@@ -133,7 +133,7 @@ func (e *emitter) writeRequest(s requestSnapshot, records []common.InvocationRec
 	}
 	omitted := len(all) - len(selected)
 
-	ev := e.log.WithLevel(level).
+	ev := e.event(level).
 		Str("event", "rpc.request.completed").
 		Str("project", s.project).
 		Str("operational_request_id", s.opID)
@@ -191,7 +191,7 @@ func (e *emitter) writeAttempt(s requestSnapshot, c classified) {
 		level = zerolog.WarnLevel
 	}
 	r := c.rec
-	ev := e.log.WithLevel(level).
+	ev := e.event(level).
 		Str("event", "rpc.attempt.completed").
 		Str("project", s.project).
 		Str("operational_request_id", s.opID)

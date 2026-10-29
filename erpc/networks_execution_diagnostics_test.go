@@ -601,3 +601,46 @@ func TestExecutionDiagnostics_MultiplexedFollower(t *testing.T) {
 	assert.Equal(t, "failed", follower.str("outcome"))
 	assert.Equal(t, 0, follower.num("invocations"))
 }
+
+// rejectingPreForward refuses every upstream in the upstream pre-hook, the
+// way a block-range check does, so nothing reaches a client.
+type rejectingPreForward struct {
+	common.ArchitectureHandler
+}
+
+func (rejectingPreForward) HandleUpstreamPreForward(_ context.Context, _ common.Network, u common.Upstream, _ *common.NormalizedRequest, _ bool) (bool, *common.NormalizedResponse, error) {
+	return true, nil, common.NewErrUpstreamRequestSkipped(errors.New("block range unavailable"), u.Id())
+}
+
+func TestExecutionDiagnostics_UpstreamPreHookRejection(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForEvmStatePoller()
+	var rpc1Calls, rpc2Calls atomic.Int32
+	diagOk("http://rpc1.localhost", 0, &rpc1Calls)
+	diagOk("http://rpc2.localhost", 0, &rpc2Calls)
+
+	buf := execdiag.ConfigureForTest(t, nil)
+	dumpOnFailure(t, buf)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	network := setupTestNetwork(t, ctx, diagUpstreams(), diagNetworkConfig(diagRetry(1)))
+	network.architectureHandler = rejectingPreForward{network.architectureHandler}
+
+	_, err := network.Forward(ctx, common.NewNormalizedRequest([]byte(diagBalanceReq)))
+	require.Error(t, err)
+	assert.Zero(t, rpc1Calls.Load()+rpc2Calls.Load())
+
+	evs := diagEvents(t, buf)
+	sums := diagFilter(evs, "rpc.request.completed")
+	require.Len(t, sums, 1)
+	sum := sums[0]
+	assert.Equal(t, 0, sum.num("dispatches"))
+	assert.Equal(t, 2, sum.num("invocations"))
+	assert.Equal(t, true, sum["evidence_complete"])
+	for _, id := range []string{"rpc1", "rpc2"} {
+		a := diagAttemptFor(t, diagAttemptsOf(evs, sum.str("operational_request_id")), id)
+		assert.Equal(t, "none", a.str("dispatch"))
+		assert.Equal(t, "skipped", a.str("class"))
+	}
+}

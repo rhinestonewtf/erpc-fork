@@ -87,18 +87,23 @@ func Configure(appCtx context.Context, cfg *common.ExecutionDiagnosticsConfig, b
 	e := newEmitter(base, &eff, time.Now)
 	start(appCtx, e)
 
-	e.log.Info().
+	e.event(zerolog.InfoLevel).
 		Str("event", "rpc.diagnostics.configured").
 		Float64("max_events_per_second", eff.MaxEventsPerSecond).
 		Int("burst", eff.Burst).
 		Int("max_attempt_events_per_request", eff.MaxAttemptEventsPerRequest).
 		Msg("execution diagnostics configured")
 
-	if gl := zerolog.GlobalLevel(); gl > zerolog.InfoLevel && mainLogger != nil {
+	if zerolog.GlobalLevel() == zerolog.Disabled && mainLogger != nil {
 		mainLogger.Error().
-			Str("globalLevel", gl.String()).
-			Msg("execution diagnostics are enabled but (partially) suppressed by the process-wide LOG_LEVEL floor")
+			Msg("execution diagnostics are enabled but LOG_LEVEL=disabled silences them")
 	}
+}
+
+// event starts a line that bypasses the process-wide LOG_LEVEL floor: zerolog
+// only filters NoLevel at Disabled, so the level is written as a plain field.
+func (e *emitter) event(level zerolog.Level) *zerolog.Event {
+	return e.log.WithLevel(zerolog.NoLevel).Str(zerolog.LevelFieldName, level.String())
 }
 
 func start(appCtx context.Context, e *emitter) {
@@ -139,7 +144,7 @@ func (e *emitter) flushSuppressed() {
 	if reqs == 0 && lines == 0 && trs == 0 {
 		return
 	}
-	e.log.Warn().
+	e.event(zerolog.WarnLevel).
 		Str("event", "rpc.diagnostics.suppressed").
 		Float64("window_ms", float64(now.UnixNano()-start)/float64(time.Millisecond)).
 		Int64("requests_suppressed", reqs).

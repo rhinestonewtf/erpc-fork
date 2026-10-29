@@ -524,10 +524,10 @@ are recorded. Use `sampleRate: 0.0000001` because `sampleRate: 0` is rewritten t
     logged, even if you lower the level later via the admin API. Source: <SourceLink file="common/tracing_core.go" lines="119-122" />
 13. **`console.error` in TypeScript config scripts throws `TypeError`.** Only `debug`,
     `info`, `log`, `trace`, and `warn` are registered in the Sobek runtime. Source: <SourceLink file="common/console.go" lines="15-21" />
-14. **The `LOG_LEVEL` env var is a process-wide floor that also filters execution
-    diagnostics.** The stream ignores `logLevel`, but `LOG_LEVEL=warn` drops its `info` events
-    and `LOG_LEVEL=error` drops all of them. eRPC logs one `error` line at startup when this
-    happens. Source: <SourceLink file="execdiag/config.go" />
+14. **Execution diagnostics ignore both `logLevel` and the `LOG_LEVEL` floor, except
+    `LOG_LEVEL=disabled`.** Events are written at zerolog's `NoLevel` with an explicit `level`
+    field, so shipped lines look the same. `LOG_LEVEL=disabled` silences them and eRPC logs one
+    `error` line at startup. Source: <SourceLink file="execdiag/config.go" />
 15. **`dispatch=attempted` does not prove the provider received the request.** It means the
     client reached network I/O; a transport failure after that point may or may not have
     reached the provider.

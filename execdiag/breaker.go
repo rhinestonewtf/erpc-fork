@@ -18,7 +18,7 @@ func BreakerTransition(projectId, networkId, upstreamId, vendor, scope, from, to
 	if to == "open" {
 		level = zerolog.WarnLevel
 	}
-	ev := e.log.WithLevel(level).
+	ev := e.event(level).
 		Str("event", "rpc.breaker.transition").
 		Str("project", projectId).
 		Str("network", networkId).
