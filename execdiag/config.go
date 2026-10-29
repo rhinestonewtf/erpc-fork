@@ -95,9 +95,7 @@ func Configure(appCtx context.Context, cfg *common.ExecutionDiagnosticsConfig, b
 		Msg("execution diagnostics configured")
 }
 
-// event starts a line that bypasses the process-wide LOG_LEVEL floor: zerolog
-// only filters NoLevel at Disabled, so the level is written as a plain field.
-// Global Disabled (LOG_LEVEL=disabled, ERPC_NOLOGS) silences the stream by design.
+// NoLevel bypasses the LOG_LEVEL floor except Disabled; write level as a field.
 func (e *emitter) event(level zerolog.Level) *zerolog.Event {
 	return e.log.WithLevel(zerolog.NoLevel).Str(zerolog.LevelFieldName, level.String())
 }

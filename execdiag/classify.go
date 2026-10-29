@@ -162,9 +162,7 @@ func (c chain) is(targets ...error) bool {
 	return false
 }
 
-// emptyExhaustion reports an ErrUpstreamsExhausted that carries no upstream
-// error: every candidate was filtered out before invocation, so nothing was
-// tried (the same reading as common.IsRetryableTowardNetwork).
+// No cause means nothing was tried, as in common.IsRetryableTowardNetwork.
 func (c chain) emptyExhaustion() bool {
 	n := len(c.codes)
 	return n > 0 && len(c.joined) == 0 && c.codes[n-1] == common.ErrCodeUpstreamsExhausted
