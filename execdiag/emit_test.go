@@ -90,6 +90,20 @@ func record(st *common.ExecState, at time.Time, id, dispatch string, err error) 
 	})
 }
 
+// recordOk records a successful invocation that returned resp.
+func recordOk(st *common.ExecState, at time.Time, id string, resp *common.NormalizedResponse) {
+	st.InvocationStarted()
+	st.CompleteInvocation(common.InvocationRecord{
+		UpstreamId:      id,
+		VendorName:      "vendor",
+		StartedAt:       at,
+		Duration:        time.Millisecond,
+		Dispatch:        common.DispatchAttempted,
+		SelectionReason: "primary",
+		BreakerState:    BreakerNone,
+	}, resp)
+}
+
 func okResp(req *common.NormalizedRequest, upstreamId string) *common.NormalizedResponse {
 	return common.NewNormalizedResponse().WithRequest(req).SetUpstream(common.NewFakeUpstream(upstreamId))
 }
@@ -115,9 +129,10 @@ func TestFinish_RecoveredBreakerRejection(t *testing.T) {
 		UpstreamId: "rpc1", StartedAt: now, Dispatch: common.DispatchNone, Err: breakerErr(),
 		SelectionReason: "primary", BreakerState: "open", BreakerScope: "method=*",
 	})
-	record(st, now.Add(time.Millisecond), "rpc2", common.DispatchAttempted, nil)
+	won := okResp(req, "rpc2")
+	recordOk(st, now.Add(time.Millisecond), "rpc2", won)
 
-	d.Finish(ctx, okResp(req, "rpc2"), nil)
+	d.Finish(ctx, won, nil)
 
 	lines := parseLines(t, buf)
 	assertEventContract(t, lines)
@@ -260,6 +275,25 @@ func TestBudget_RequestsTransitionsAndSuppressionReport(t *testing.T) {
 	assertEventContract(t, parseLines(t, buf))
 }
 
+func TestWinner_IsTheReturnedResponseNotTheUpstream(t *testing.T) {
+	buf := ConfigureForTest(t, nil)
+	req := newReq()
+	ctx, d := BeginRequest(context.Background(), req, "main", "evm:1")
+	st := req.ExecState()
+	now := time.Now()
+	record(st, now, "rpc2", common.DispatchAttempted, serverErr(503))
+	// Upstream-level hedge: both legs of rpc1 succeed; the primary is kept.
+	primary := okResp(req, "rpc1")
+	recordOk(st, now.Add(time.Millisecond), "rpc1", primary)
+	recordOk(st, now.Add(2*time.Millisecond), "rpc1", okResp(req, "rpc1"))
+	d.Finish(ctx, primary, nil)
+
+	att := byEvent(parseLines(t, buf), "rpc.attempt.completed")
+	require.Len(t, att, 3)
+	assert.Equal(t, true, att[1]["won"])
+	assert.Equal(t, false, att[2]["won"])
+}
+
 func TestAttemptCap_SelectsWonThenNotable(t *testing.T) {
 	buf := ConfigureForTest(t, cfgOf(10, 100, 2))
 	req := newReq()
@@ -270,8 +304,9 @@ func TestAttemptCap_SelectsWonThenNotable(t *testing.T) {
 	record(st, now.Add(1*time.Millisecond), "rpc2", common.DispatchAttempted, upReq(common.NewErrEndpointTransportFailure(testURL, errors.New("refused"))))
 	record(st, now.Add(2*time.Millisecond), "rpc3", common.DispatchAttempted, upReq(common.NewErrEndpointRequestCanceled(context.Canceled)))
 	record(st, now.Add(3*time.Millisecond), "rpc4", common.DispatchAttempted, upReq(common.NewErrEndpointMissingData(nil, nil)))
-	record(st, now.Add(4*time.Millisecond), "rpc5", common.DispatchAttempted, nil)
-	d.Finish(ctx, okResp(req, "rpc5"), nil)
+	won := okResp(req, "rpc5")
+	recordOk(st, now.Add(4*time.Millisecond), "rpc5", won)
+	d.Finish(ctx, won, nil)
 
 	lines := parseLines(t, buf)
 	sum := byEvent(lines, "rpc.request.completed")
@@ -385,7 +420,7 @@ func TestUpstreamCall_PostForwardChargesTheReturnedResponse(t *testing.T) {
 	b.End(loser, nil)
 
 	rejection := errors.New("integrity violation")
-	uc.PostForward(winner, nil, rejection)
+	uc.PostForward(winner, nil, nil, rejection)
 
 	recs := req.ExecState().Invocations()
 	require.Len(t, recs, 2)

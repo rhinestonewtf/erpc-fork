@@ -101,6 +101,11 @@ func (s *RequestScope) Finish(ctx context.Context, resp *common.NormalizedRespon
 		return
 	}
 	st := s.req.ExecState()
+	if err == nil {
+		// Only a response an invocation returned matches; cache hits and
+		// follower copies mark nothing.
+		st.MarkInvocationWon(resp)
+	}
 	records, inflight := st.InvocationSnapshot()
 
 	finalClass, finalCode, finalCause := FinalError(err)
@@ -179,11 +184,6 @@ func (s *RequestScope) capture(
 		snap.path = pathFollower
 	} else if resp != nil && resp.FromCache() {
 		snap.path = pathCacheHit
-	}
-	if err == nil && resp != nil && snap.path == pathForward {
-		if u := resp.Upstream(); u != nil {
-			snap.wonUpstream = u.Id()
-		}
 	}
 	return snap
 }

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestInvocationLedger_DisabledByDefault(t *testing.T) {
@@ -31,7 +32,7 @@ func TestInvocationLedger_Concurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			st.InvocationStarted()
-			st.CompleteInvocation(InvocationRecord{UpstreamId: "u"})
+			st.CompleteInvocation(InvocationRecord{UpstreamId: "u"}, nil)
 		}()
 	}
 	wg.Wait()
@@ -89,19 +90,28 @@ func TestDispatchProbe(t *testing.T) {
 	assert.Equal(t, []string{DispatchUnknown}, got, "a probe that is not pending settles immediately")
 }
 
-func TestInvocationLedger_AmendError(t *testing.T) {
+func TestInvocationLedger_BoundToResponse(t *testing.T) {
 	st := &ExecState{}
 	st.EnableInvocationLedger()
+	a, b, replaced, unknown := NewNormalizedResponse(), NewNormalizedResponse(), NewNormalizedResponse(), NewNormalizedResponse()
 	st.InvocationStarted()
-	idx := st.CompleteInvocation(InvocationRecord{UpstreamId: "u"})
-	first := errors.New("post-hook rejection")
-	st.AmendInvocationError(idx, first)
-	st.AmendInvocationError(idx, errors.New("later"))
-	st.AmendInvocationError(idx+1, first)
-	recs := st.Invocations()
-	assert.Len(t, recs, 1)
-	assert.Equal(t, first, recs[0].Err, "only an error-free record is amended, once")
+	st.InvocationStarted()
+	st.CompleteInvocation(InvocationRecord{UpstreamId: "u"}, a)
+	st.CompleteInvocation(InvocationRecord{UpstreamId: "u"}, b)
 
-	off := &ExecState{}
-	assert.Equal(t, -1, off.CompleteInvocation(InvocationRecord{}))
+	first := errors.New("post-hook rejection")
+	assert.True(t, st.AmendInvocationError(a, first))
+	assert.True(t, st.AmendInvocationError(a, errors.New("later")))
+	assert.False(t, st.AmendInvocationError(unknown, first))
+
+	st.AliasInvocationResponse(b, replaced)
+	st.MarkInvocationWon(replaced)
+	st.MarkInvocationWon(unknown)
+
+	recs := st.Invocations()
+	require.Len(t, recs, 2)
+	assert.Equal(t, first, recs[0].Err, "only an error-free record is amended, once")
+	assert.False(t, recs[0].Won)
+	assert.NoError(t, recs[1].Err)
+	assert.True(t, recs[1].Won)
 }

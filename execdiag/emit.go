@@ -24,7 +24,6 @@ type requestSnapshot struct {
 	logicalAttempts, networkAttempts         int
 	retries, hedges                          int
 	consensusSlots, subrequests              int
-	wonUpstream                              string
 }
 
 type classified struct {
@@ -60,22 +59,15 @@ func ms(d time.Duration) float64 {
 	return float64(d) / float64(time.Millisecond)
 }
 
-func classifyRecords(records []common.InvocationRecord, wonUpstream string) []classified {
+func classifyRecords(records []common.InvocationRecord) []classified {
 	sorted := make([]common.InvocationRecord, len(records))
 	copy(sorted, records)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].StartedAt.Before(sorted[j].StartedAt) })
 
 	out := make([]classified, len(sorted))
-	wonIdx := -1
 	for i, r := range sorted {
 		class, outcome, notable := Classify(r.Err, r.Dispatch, true)
-		out[i] = classified{rec: r, no: i + 1, class: class, outcome: outcome, notable: notable}
-		if wonUpstream != "" && r.UpstreamId == wonUpstream && (class == ClassResult || class == ClassApplicationError) {
-			wonIdx = i
-		}
-	}
-	if wonIdx >= 0 {
-		out[wonIdx].won = true
+		out[i] = classified{rec: r, no: i + 1, class: class, outcome: outcome, notable: notable, won: r.Won}
 	}
 	return out
 }
@@ -101,7 +93,7 @@ func selectAttempts(all []classified, max int) []classified {
 }
 
 func (e *emitter) writeRequest(s requestSnapshot, records []common.InvocationRecord, inflight int) {
-	all := classifyRecords(records, s.wonUpstream)
+	all := classifyRecords(records)
 	selected := selectAttempts(all, min(e.maxAttempts, s.attemptBudget))
 	// Computed here, not at Finish, because late invocations can dispatch.
 	outcome := requestOutcome(s.hasError, s.finalClass, s.path, records)

@@ -2,7 +2,6 @@ package execdiag
 
 import (
 	"context"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -29,12 +28,6 @@ type UpstreamCall struct {
 	netAttempt int
 	start      time.Time
 	recorded   atomic.Bool
-
-	// okByResp maps each successful invocation's response to its ledger
-	// index, so a post-forward rejection is charged to the leg whose
-	// response was actually returned, not to whichever finished last.
-	okMu     sync.Mutex
-	okByResp map[*common.NormalizedResponse]int
 }
 
 type upstreamCallKey struct{}
@@ -92,29 +85,21 @@ func BeginUpstreamCall(ctx context.Context, req *common.NormalizedRequest, u com
 	return context.WithValue(ctx, upstreamCallKey{}, uc), uc
 }
 
-// PostForward attributes a post-forward hook's rejection of a successful
-// response to the invocation that produced it.
-func (uc *UpstreamCall) PostForward(resp *common.NormalizedResponse, forwardErr, postErr error) {
-	if uc == nil || forwardErr != nil || postErr == nil {
+// PostForward ties the post-forward hook's result to the invocation whose
+// response it inspected: a rejection is charged to that invocation (matched
+// by response, not completion order), and a replacement response inherits it.
+func (uc *UpstreamCall) PostForward(fwdResp *common.NormalizedResponse, fwdErr error, resp *common.NormalizedResponse, postErr error) {
+	if uc == nil || fwdErr != nil {
 		return
 	}
-	uc.okMu.Lock()
-	idx, ok := uc.okByResp[resp]
-	uc.okMu.Unlock()
-	if ok {
-		uc.req.ExecState().AmendInvocationError(idx, postErr)
+	st := uc.req.ExecState()
+	if postErr == nil {
+		st.AliasInvocationResponse(fwdResp, resp)
 		return
 	}
-	uc.End(postErr)
-}
-
-func (uc *UpstreamCall) recordOk(resp *common.NormalizedResponse, idx int) {
-	uc.okMu.Lock()
-	defer uc.okMu.Unlock()
-	if uc.okByResp == nil {
-		uc.okByResp = make(map[*common.NormalizedResponse]int)
+	if !st.AmendInvocationError(fwdResp, postErr) {
+		uc.End(postErr)
 	}
-	uc.okByResp[resp] = idx
 }
 
 func (uc *UpstreamCall) End(err error) {
@@ -206,10 +191,7 @@ func (inv *Invocation) End(resp *common.NormalizedResponse, err error) {
 	}
 	inv.probe.Settle(func(state string) {
 		rec.Dispatch = state
-		idx := inv.st.CompleteInvocation(rec)
-		if err == nil && resp != nil && idx >= 0 && inv.call != nil {
-			inv.call.recordOk(resp, idx)
-		}
+		inv.st.CompleteInvocation(rec, resp)
 	})
 }
 

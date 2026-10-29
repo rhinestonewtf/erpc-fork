@@ -30,6 +30,8 @@ type InvocationRecord struct {
 	NetworkAttempt  int
 	BreakerState    string
 	BreakerScope    string
+	// Won marks the invocation whose response the request returned.
+	Won bool
 }
 
 // invocationLedger is separate from the upstream attempt log on purpose: it
@@ -40,6 +42,9 @@ type invocationLedger struct {
 	ledgerMu       sync.Mutex
 	ledger         []InvocationRecord
 	ledgerInflight atomic.Int32
+	// ledgerByResp ties each successful invocation to the response it
+	// returned, so winners are identified exactly rather than by upstream id.
+	ledgerByResp map[*NormalizedResponse]int
 }
 
 func (s *ExecState) EnableInvocationLedger() {
@@ -80,29 +85,63 @@ func (s *ExecState) InvocationSnapshot() ([]InvocationRecord, int) {
 }
 
 // CompleteInvocation publishes the record and retires its in-flight slot
-// atomically with respect to diagnostic snapshots. It returns the record's
-// index for AmendInvocationError, or -1 when the ledger is disabled.
-func (s *ExecState) CompleteInvocation(r InvocationRecord) int {
+// atomically with respect to diagnostic snapshots. A successful record is
+// bound to resp for AmendInvocationError, AliasInvocationResponse and
+// MarkInvocationWon.
+func (s *ExecState) CompleteInvocation(r InvocationRecord, resp *NormalizedResponse) {
 	if !s.InvocationLedgerEnabled() {
-		return -1
+		return
 	}
 	s.ledgerMu.Lock()
 	defer s.ledgerMu.Unlock()
 	s.ledger = append(s.ledger, r)
 	s.ledgerInflight.Add(-1)
-	return len(s.ledger) - 1
+	if r.Err == nil && resp != nil {
+		if s.ledgerByResp == nil {
+			s.ledgerByResp = make(map[*NormalizedResponse]int)
+		}
+		s.ledgerByResp[resp] = len(s.ledger) - 1
+	}
 }
 
 // AmendInvocationError attaches an error found after the invocation returned
-// (a post-forward hook rejecting the response) to a record that had none.
-func (s *ExecState) AmendInvocationError(idx int, err error) {
-	if !s.InvocationLedgerEnabled() || err == nil {
+// (a post-forward hook rejecting resp) to the record that produced resp. It
+// reports whether such a record exists.
+func (s *ExecState) AmendInvocationError(resp *NormalizedResponse, err error) bool {
+	if !s.InvocationLedgerEnabled() || resp == nil || err == nil {
+		return false
+	}
+	s.ledgerMu.Lock()
+	defer s.ledgerMu.Unlock()
+	idx, ok := s.ledgerByResp[resp]
+	if ok && s.ledger[idx].Err == nil {
+		s.ledger[idx].Err = err
+	}
+	return ok
+}
+
+// AliasInvocationResponse binds a response that replaced from (e.g. built by
+// a post-forward hook) to the same record.
+func (s *ExecState) AliasInvocationResponse(from, to *NormalizedResponse) {
+	if !s.InvocationLedgerEnabled() || from == nil || to == nil || from == to {
 		return
 	}
 	s.ledgerMu.Lock()
 	defer s.ledgerMu.Unlock()
-	if idx >= 0 && idx < len(s.ledger) && s.ledger[idx].Err == nil {
-		s.ledger[idx].Err = err
+	if idx, ok := s.ledgerByResp[from]; ok {
+		s.ledgerByResp[to] = idx
+	}
+}
+
+// MarkInvocationWon flags the record that produced resp, if any.
+func (s *ExecState) MarkInvocationWon(resp *NormalizedResponse) {
+	if !s.InvocationLedgerEnabled() || resp == nil {
+		return
+	}
+	s.ledgerMu.Lock()
+	defer s.ledgerMu.Unlock()
+	if idx, ok := s.ledgerByResp[resp]; ok {
+		s.ledger[idx].Won = true
 	}
 }
 

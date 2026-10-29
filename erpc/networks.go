@@ -2812,7 +2812,7 @@ func (n *Network) doForward(execSpanCtx context.Context, u common.Upstream, req 
 	if h != nil {
 		fwdResp, fwdErr := resp, err
 		resp, err = h.HandleUpstreamPostForward(execSpanCtx, n, u, req, resp, err, skipCacheRead)
-		uc.PostForward(fwdResp, fwdErr, err)
+		uc.PostForward(fwdResp, fwdErr, resp, err)
 	}
 	return resp, err
 }
