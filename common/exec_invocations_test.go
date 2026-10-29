@@ -63,17 +63,30 @@ func TestDispatchProbe(t *testing.T) {
 	MarkDispatchAttempted(WithDispatchProbe(context.Background(), p2))
 	assert.Equal(t, DispatchAttempted, p2.State())
 
-	// A batch-held call is never "none" until the batch drops it.
+	// Settle reports a batch-held call only once the batch sends or drops it.
+	var got []string
+	record := func(state string) { got = append(got, state) }
 	p3 := &DispatchProbe{}
 	ctx3 := WithDispatchProbe(context.Background(), p3)
 	MarkDispatchObserved(ctx3)
 	MarkDispatchPending(ctx3)
-	assert.Equal(t, DispatchUnknown, p3.State())
-	MarkDispatchDropped(ctx3)
-	assert.Equal(t, DispatchNone, p3.State())
-	MarkDispatchPending(ctx3)
+	p3.Settle(record)
+	assert.Empty(t, got)
 	MarkDispatchAttempted(ctx3)
-	assert.Equal(t, DispatchAttempted, p3.State())
+	assert.Equal(t, []string{DispatchAttempted}, got)
+
+	got = nil
+	p4 := &DispatchProbe{}
+	ctx4 := WithDispatchProbe(context.Background(), p4)
+	MarkDispatchObserved(ctx4)
+	MarkDispatchPending(ctx4)
+	p4.Settle(record)
+	MarkDispatchDropped(ctx4)
+	assert.Equal(t, []string{DispatchNone}, got)
+
+	got = nil
+	(&DispatchProbe{}).Settle(record)
+	assert.Equal(t, []string{DispatchUnknown}, got, "a probe that is not pending settles immediately")
 }
 
 func TestInvocationLedger_AmendError(t *testing.T) {

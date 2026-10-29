@@ -42,7 +42,7 @@ func diagInner(release <-chan struct{}, fail bool) func(ctx context.Context, isH
 	return func(ctx context.Context, _ bool) (resp *common.NormalizedResponse, err error) {
 		req := ctx.Value(diagReqKey{}).(*common.NormalizedRequest)
 		ctx, inv := execdiag.BeginInvocation(ctx, req, common.NewFakeUpstream("rpc1"), false)
-		defer func() { inv.End(err) }()
+		defer func() { inv.End(nil, err) }()
 		common.MarkDispatchAttempted(ctx)
 		if release != nil {
 			<-release

@@ -304,7 +304,7 @@ func TestLateInvocations(t *testing.T) {
 		record(req.ExecState(), time.Now(), "rpc2", common.DispatchAttempted, serverErr(503))
 		d.Finish(ctx, nil, exhausted(serverErr(503)))
 		assert.Empty(t, buf.Lines(), "emission must wait for the in-flight invocation")
-		inv.End(upReq(common.NewErrEndpointRequestCanceled(context.Canceled)))
+		inv.End(nil, upReq(common.NewErrEndpointRequestCanceled(context.Canceled)))
 
 		require.Eventually(t, func() bool { return len(buf.Lines()) == 3 }, time.Second, 10*time.Millisecond)
 		lines := parseLines(t, buf)
@@ -341,7 +341,7 @@ func TestInvocation_DispatchProbeAndBreakerAdmission(t *testing.T) {
 	ictx, inv := BeginInvocation(ctx, req, common.NewFakeUpstream("rpc1"), false)
 	assert.Equal(t, 1, req.ExecState().InvocationsInflight())
 	common.MarkDispatchAttempted(ictx)
-	inv.End(nil)
+	inv.End(nil, nil)
 
 	recs := req.ExecState().Invocations()
 	require.Len(t, recs, 1)
@@ -349,6 +349,48 @@ func TestInvocation_DispatchProbeAndBreakerAdmission(t *testing.T) {
 	assert.Equal(t, "half_open", recs[0].BreakerState)
 	assert.Equal(t, "method=*", recs[0].BreakerScope)
 	assert.Equal(t, 0, req.ExecState().InvocationsInflight())
+}
+
+func TestInvocation_PendingBatchStaysInflightUntilDecided(t *testing.T) {
+	ConfigureForTest(t, nil)
+	req := newReq()
+	ctx, _ := BeginRequest(context.Background(), req, "main", "evm:1")
+	ictx, inv := BeginInvocation(ctx, req, common.NewFakeUpstream("rpc1"), true)
+	common.MarkDispatchObserved(ictx)
+	common.MarkDispatchPending(ictx)
+
+	// The caller gave up (hedge loss) while the batch still held the call.
+	inv.End(nil, common.NewErrEndpointRequestCanceled(context.Canceled))
+	assert.Empty(t, req.ExecState().Invocations())
+	assert.Equal(t, 1, req.ExecState().InvocationsInflight())
+
+	common.MarkDispatchAttempted(ictx)
+	recs := req.ExecState().Invocations()
+	require.Len(t, recs, 1)
+	assert.Equal(t, common.DispatchAttempted, recs[0].Dispatch)
+	assert.Equal(t, 0, req.ExecState().InvocationsInflight())
+}
+
+func TestUpstreamCall_PostForwardChargesTheReturnedResponse(t *testing.T) {
+	ConfigureForTest(t, nil)
+	req := newReq()
+	ctx, _ := BeginRequest(context.Background(), req, "main", "evm:1")
+	uctx, uc := BeginUpstreamCall(ctx, req, common.NewFakeUpstream("rpc1"), false)
+	winner, loser := common.NewNormalizedResponse(), common.NewNormalizedResponse()
+
+	// The returned (winning) leg finishes first; the loser finishes last.
+	_, a := BeginInvocation(uctx, req, common.NewFakeUpstream("rpc1"), false)
+	_, b := BeginInvocation(uctx, req, common.NewFakeUpstream("rpc1"), true)
+	a.End(winner, nil)
+	b.End(loser, nil)
+
+	rejection := errors.New("integrity violation")
+	uc.PostForward(winner, nil, rejection)
+
+	recs := req.ExecState().Invocations()
+	require.Len(t, recs, 2)
+	assert.Equal(t, rejection, recs[0].Err)
+	assert.NoError(t, recs[1].Err)
 }
 
 func TestUpstreamCall_RecordsEarlyReturnOnce(t *testing.T) {
@@ -416,7 +458,7 @@ func TestDisabled_NoLedgerNoEvents(t *testing.T) {
 	assert.False(t, req.ExecState().InvocationLedgerEnabled())
 	_, inv := BeginInvocation(ctx, req, common.NewFakeUpstream("rpc1"), false)
 	assert.Nil(t, inv)
-	inv.End(errors.New("x"))
+	inv.End(nil, errors.New("x"))
 	d.Finish(ctx, nil, errors.New("x"))
 	BreakerTransition("main", "evm:1", "rpc1", "v", "", "closed", "open", "r")
 	assert.Empty(t, buf.Lines())

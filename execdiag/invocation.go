@@ -2,6 +2,7 @@ package execdiag
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -28,9 +29,12 @@ type UpstreamCall struct {
 	netAttempt int
 	start      time.Time
 	recorded   atomic.Bool
-	// lastOk is the ledger index of the latest successful invocation under
-	// this call, i.e. the one whose response the post-forward hook inspects.
-	lastOk atomic.Int64
+
+	// okByResp maps each successful invocation's response to its ledger
+	// index, so a post-forward rejection is charged to the leg whose
+	// response was actually returned, not to whichever finished last.
+	okMu     sync.Mutex
+	okByResp map[*common.NormalizedResponse]int
 }
 
 type upstreamCallKey struct{}
@@ -70,21 +74,32 @@ func BeginUpstreamCall(ctx context.Context, req *common.NormalizedRequest, u com
 		netAttempt: snap.NetworkAttempts,
 		start:      time.Now(),
 	}
-	uc.lastOk.Store(-1)
 	return context.WithValue(ctx, upstreamCallKey{}, uc), uc
 }
 
 // PostForward attributes a post-forward hook's rejection of a successful
 // response to the invocation that produced it.
-func (uc *UpstreamCall) PostForward(forwardErr, postErr error) {
+func (uc *UpstreamCall) PostForward(resp *common.NormalizedResponse, forwardErr, postErr error) {
 	if uc == nil || forwardErr != nil || postErr == nil {
 		return
 	}
-	if idx := uc.lastOk.Load(); idx >= 0 {
-		uc.req.ExecState().AmendInvocationError(int(idx), postErr)
+	uc.okMu.Lock()
+	idx, ok := uc.okByResp[resp]
+	uc.okMu.Unlock()
+	if ok {
+		uc.req.ExecState().AmendInvocationError(idx, postErr)
 		return
 	}
 	uc.End(postErr)
+}
+
+func (uc *UpstreamCall) recordOk(resp *common.NormalizedResponse, idx int) {
+	uc.okMu.Lock()
+	defer uc.okMu.Unlock()
+	if uc.okByResp == nil {
+		uc.okByResp = make(map[*common.NormalizedResponse]int)
+	}
+	uc.okByResp[resp] = idx
 }
 
 func (uc *UpstreamCall) End(err error) {
@@ -154,16 +169,17 @@ func BeginInvocation(ctx context.Context, req *common.NormalizedRequest, u commo
 	return common.WithDispatchProbe(ctx, inv.probe), inv
 }
 
-func (inv *Invocation) End(err error) {
+// End records the invocation's outcome. A batched call the batch has not yet
+// sent or dropped stays in flight until it does, so its dispatch is final.
+func (inv *Invocation) End(resp *common.NormalizedResponse, err error) {
 	if inv == nil {
 		return
 	}
-	idx := inv.st.CompleteInvocation(common.InvocationRecord{
+	rec := common.InvocationRecord{
 		UpstreamId:      inv.upstreamId,
 		VendorName:      inv.vendor,
 		StartedAt:       inv.start,
 		Duration:        time.Since(inv.start),
-		Dispatch:        inv.probe.State(),
 		Err:             err,
 		IsHedge:         inv.isHedge,
 		IsRetry:         inv.isRetry,
@@ -171,10 +187,14 @@ func (inv *Invocation) End(err error) {
 		NetworkAttempt:  inv.netAttempt,
 		BreakerState:    inv.breaker.state,
 		BreakerScope:    inv.breaker.scope,
-	})
-	if err == nil && idx >= 0 && inv.call != nil {
-		inv.call.lastOk.Store(int64(idx))
 	}
+	inv.probe.Settle(func(state string) {
+		rec.Dispatch = state
+		idx := inv.st.CompleteInvocation(rec)
+		if err == nil && resp != nil && idx >= 0 && inv.call != nil {
+			inv.call.recordOk(resp, idx)
+		}
+	})
 }
 
 // RecordLocal records an invocation that was refused before reaching the

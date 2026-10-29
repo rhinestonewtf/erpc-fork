@@ -2810,9 +2810,9 @@ func (n *Network) doForward(execSpanCtx context.Context, u common.Upstream, req 
 	resp, err := u.Forward(ectx, req, false, isHedgeAttempt)
 	uc.End(err)
 	if h != nil {
-		fwdErr := err
+		fwdResp, fwdErr := resp, err
 		resp, err = h.HandleUpstreamPostForward(execSpanCtx, n, u, req, resp, err, skipCacheRead)
-		uc.PostForward(fwdErr, err)
+		uc.PostForward(fwdResp, fwdErr, err)
 	}
 	return resp, err
 }

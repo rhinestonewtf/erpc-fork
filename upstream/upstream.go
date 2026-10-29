@@ -644,7 +644,7 @@ func (u *Upstream) Forward(ctx context.Context, nrq *common.NormalizedRequest, b
 		) (resp *common.NormalizedResponse, retErr error) {
 			// Before SendRequest so the client sees the dispatch probe.
 			ctx, inv := execdiag.BeginInvocation(ctx, nrq, u, isHedge || isHedgeAttempt)
-			defer func() { inv.End(retErr) }()
+			defer func() { inv.End(resp, retErr) }()
 			st := nrq.ExecState()
 			snap := st.Snapshot()
 			attemptStart := time.Now()

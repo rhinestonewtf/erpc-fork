@@ -531,9 +531,9 @@ are recorded. Use `sampleRate: 0.0000001` because `sampleRate: 0` is rewritten t
 15. **`dispatch=attempted` does not prove the provider received the request.** It means the
     client reached network I/O; a transport failure after that point may or may not have
     reached the provider.
-16. **`dispatch=unknown`** marks invocations whose transport client does not report dispatch,
-    and batched calls whose caller stopped waiting (cancellation, hedge loss) after the batch
-    took them but before it reached network I/O. It is never shown as `none`.
+16. **`dispatch=unknown`** marks invocations whose transport client does not report dispatch.
+    It is never shown as `none`. A batched call whose caller stopped waiting (cancellation,
+    hedge loss) stays in flight until the batch sends or drops it, so its `dispatch` is final.
 17. **Hedge losers may still be running when the winner returns.** Emission waits up to 1s
     for them; anything still running is counted in `invocations_inflight` and the summary
     has `evidence_complete=false`.
@@ -550,7 +550,7 @@ are recorded. Use `sampleRate: 0.0000001` because `sampleRate: 0` is rewritten t
     `dispatches` counts invocations that reached network I/O. Breaker state is per replica,
     per upstream, per failsafe entry (`breaker_scope`).
 22. **A post-forward hook rejecting a response (e.g. an integrity check) is charged to the
-    invocation that returned it**, which keeps `dispatch=attempted` and takes the hook's error
+    invocation whose response was returned** (matched by response, not completion order), which keeps `dispatch=attempted` and takes the hook's error
     class, so a request recovered by another upstream is still notable.
 23. **Out of scope:** requests rejected before network forwarding (auth, project rate
     limits), internal requests (state pollers, probes) and cache-connector breakers.

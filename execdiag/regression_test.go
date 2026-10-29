@@ -31,7 +31,7 @@ func TestLateDispatchChangesRejectedOutcome(t *testing.T) {
 	ictx, inv := BeginInvocation(ctx, req, common.NewFakeUpstream("rpc1"), false)
 	common.MarkDispatchAttempted(ictx)
 	scope.Finish(ctx, nil, context.DeadlineExceeded)
-	inv.End(context.DeadlineExceeded)
+	inv.End(nil, context.DeadlineExceeded)
 	require.Eventually(t, func() bool { return len(buf.Lines()) == 2 }, time.Second, time.Millisecond)
 	sum := byEvent(parseLines(t, buf), "rpc.request.completed")[0]
 	assert.Equal(t, "failed", sum["outcome"])
