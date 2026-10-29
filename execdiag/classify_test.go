@@ -132,8 +132,26 @@ func TestClassify_FinalJoined(t *testing.T) {
 	})
 	t.Run("EmptyExhausted", func(t *testing.T) {
 		fc, code, cause := FinalError(exhausted())
-		assert.Equal(t, ClassUnclassified, fc)
+		assert.Equal(t, ClassRejected, fc)
 		assert.Equal(t, "ErrUpstreamsExhausted", code)
+		assert.Equal(t, "ErrUpstreamsExhausted", cause)
+	})
+	t.Run("ExhaustedWithUnknownCause", func(t *testing.T) {
+		fc, _, _ := FinalError(common.NewErrUpstreamsExhaustedWithCause(errors.New("boom")))
+		assert.Equal(t, ClassUnclassified, fc)
+	})
+	t.Run("EmptyExhaustedUnderTimeout", func(t *testing.T) {
+		fc, _, _ := FinalError(common.NewErrFailsafeTimeoutExceeded(common.ScopeNetwork, exhausted(), nil))
+		assert.Equal(t, ClassTimeout, fc)
+	})
+	t.Run("EmptyExhaustedUnderCancellation", func(t *testing.T) {
+		fc, _, _ := FinalError(common.NewErrEndpointRequestCanceled(exhausted()))
+		assert.Equal(t, ClassCancelled, fc)
+	})
+	t.Run("EmptyExhaustedUnderRetry", func(t *testing.T) {
+		fc, code, cause := FinalError(common.NewErrFailsafeRetryExceeded(common.ScopeNetwork, exhausted(), nil))
+		assert.Equal(t, ClassRejected, fc)
+		assert.Equal(t, "ErrFailsafeRetryExceeded", code)
 		assert.Equal(t, "ErrUpstreamsExhausted", cause)
 	})
 }

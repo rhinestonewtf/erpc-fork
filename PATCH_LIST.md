@@ -57,15 +57,22 @@ test -f .github/workflows/docker.yaml && echo OK
 test -f sync-with-upstream.sh && echo OK
 test -f PATCH_LIST.md && echo OK
 grep -q "This is a fork" CLAUDE.md && echo OK
+grep -q "execdiag.Configure(" erpc/init.go && echo OK
+grep -q "execdiag.BeginRequest(" erpc/projects.go && echo OK
+grep -q "execdiag.BeginUpstreamCall(" erpc/networks.go && echo OK
+grep -q "execdiag.BeginInvocation(" upstream/upstream.go && echo OK
+grep -q "recordBreakerRejection(" upstream/upstream_executor.go && echo OK
+grep -q "MarkDispatchAttempted(" clients/http_json_rpc_client.go && echo OK
 ```
 
 A rebase that reports success while a probe fails means the patch was dropped during
 conflict resolution. Recover it from the pre-rebase `main` in the reflog
 (`git reflog main`), not from a rewritten branch.
 
-Go patches also need `go test ./architecture/evm/... ./common/... ./health/... ./data/...` to pass — a patch
+Go patches also need `go test ./architecture/evm/... ./common/... ./health/... ./data/... ./execdiag/...` to pass — a patch
 can survive a rebase textually and still be defeated by upstream logic that moved
-around it.
+around it. Execution diagnostics also needs `go test ./erpc/ ./upstream/ ./clients/ -run 'ExecutionDiagnostics|ExecDiag|DispatchProbe'`;
+the `erpc` package is too slow to run whole as a post-sync check.
 
 ## Active patches
 
@@ -81,6 +88,7 @@ around it.
 | `0fcffa82` feat(data): carry the block timestamp through shared state; latest poll back on the shared clock (RHI-8244) | `data/shared_state_observation.go` (+ `_test`; was `shared_state_block_timestamp.go` until RHI-8178 generalised it), `architecture/evm/evm_state_poller_shared_clock_test.go`; signature changes in `data/connector.go`, `data/shared_state_variable.go`, call sites in `architecture/evm/evm_state_poller.go`, `architecture/svm/svm_state_poller.go`, `upstream/upstream.go`; `docs/pages/reference/evm/block-tracking.mdx` | `BlockTimestamp` in `data/connector.go`, and `latestBlockShared.TryUpdateIfStale(` (not `IfLocallyStale`) in `evm_state_poller.go` |
 | `39059069` feat(evm): cache the poller's block by hash and stream it by hash (RHI-8178) | `architecture/evm/evm_state_poller_block_cache.go` (+ `_test`), `data/shared_state_observation.go` (+ `_test`), hub + subscriber loop in `erpc/block_stream.go` (+ `_test`); call sites in `architecture/evm/evm_state_poller.go` (`fetchBlock`, `OnLatestBlock`), `erpc/projects_registry.go`, `data/connector.go`, `data/shared_state_variable.go`; signature adapters in `architecture/svm/svm_state_poller.go`, `upstream/upstream.go`; `docs/pages/reference/evm/block-tracking.mdx` | `cacheBlockByHash(` called in `evm_state_poller.go`, `hub.hashFor(` used in `erpc/block_stream.go`, `BlockHash` in `data/connector.go` |
 | `fc23439a` fix(evm): cache only the poller's latest fetch by hash, not the finalized one (RHI-8260, #17) — **fold into the RHI-8178 commit at the next sync** | one condition at the `cacheBlockByHash` call site in `architecture/evm/evm_state_poller.go`, `evm_state_poller_block_cache.go` comment, `TestPollFinalizedBlock_IsNotCachedByHash` | `if blockTag == "latest"` guards `cacheBlockByHash(` in `evm_state_poller.go` |
+| `122e67e3` (merge of #20; 9 commits `672465a8`…`3fa279eb`) feat(observability): distinguish upstream dispatch from local rejection (RHI-8707, #20), plus the RHI-8784 follow-up (#<PR>) — **fold into one commit at the next sync** | New: `execdiag/`; `common/exec_invocations.go`, `common/dispatch_probe.go`, `common/config_execution_diagnostics.go`; `erpc/networks_execution_diagnostics.go`, `upstream/upstream_execution_diagnostics.go`; tests: `*_execution_diagnostics_test.go`, `clients/dispatch_probe_test.go`, `common/exec_invocations_test.go`, `common/config_execution_diagnostics_test.go`. Call sites: `erpc/init.go`, `erpc/projects.go`, `erpc/http_server.go`, `erpc/multiplexer.go`; `erpc/networks.go` (`Network.Forward` → `forward`, `doForward`, `handleBlockSkip`, `handleMultiplexing`); `erpc/network_executor.go` (hedge leg tag); `upstream/upstream.go`, `upstream/upstream_executor.go`; `clients/http_json_rpc_client.go`, `clients/grpc_bds_client.go`, `clients/grpc_bds_resilience.go`; `common/exec_state.go`, `common/config.go`, `common/defaults.go`, `common/validation.go`. Other: generated `typescript/config` types and `docs/pages/operation/tracing.mdx`. | `execdiag.Configure(` in `erpc/init.go`; `execdiag.BeginRequest(` in `erpc/projects.go`; `execdiag.BeginUpstreamCall(` in `erpc/networks.go`; `execdiag.BeginInvocation(` in `upstream/upstream.go`; `recordBreakerRejection(` in `upstream/upstream_executor.go`; `MarkDispatchAttempted(` in `clients/http_json_rpc_client.go` |
 
 **RHI-6277 — gas-limit rejections are terminal.** A rejection of the transaction's gas
 limit is classified `ErrEndpointExecutionException` and **not** marked retryable toward
@@ -254,6 +262,29 @@ dropped and everything compiles and streams as before, which is what the probes 
 `TestPollLatestBlock_CachesTheBlockByHashBeforePublishingTheHead` /
 `TestBlockStreamHub_RecordsObservedHashes` catch. The registry wiring (`SetBlockCache` next
 to `SetNetworkConfig`) is the third; without it the poller has no cache and writes nothing.
+
+**RHI-8707 — execution diagnostics: dispatched vs locally rejected, per invocation.** A
+payload-free, budgeted log stream, independent of `logLevel`, records for each upstream
+invocation whether dispatch happened. It exists because breaker rejections and dispatches
+were indistinguishable in production logs and metrics. The RHI-8784 follow-up classifies
+leafless upstream exhaustion as `rejected` and aligns the documentation.
+
+*Upstreamable:* plausibly. Nothing is Rhinestone-specific, but it is large and opinionated.
+Never proposed.
+
+*Rebase risk:* medium. The logic lives in fork-only files, but its call sites sit in
+upstream-active `erpc/networks.go`, `upstream/upstream.go`, `upstream/upstream_executor.go`,
+and `clients/*`.
+
+*Silent-drop analysis:* Dropping `execdiag.Configure(` means the stream never activates;
+tests use `ConfigureForTest`, so only its probe catches that. Dropping `BeginRequest` in
+`projects.go` is caught by `TestExecutionDiagnostics_OutcomeIsAfterNetworkPostForward`,
+`BeginUpstreamCall` by `TestExecutionDiagnostics_UpstreamPreHookRejection`, and
+`recordBreakerRejection` by `TestExecutionDiagnostics_OpenBreakerZeroClientCalls` /
+`TestExecDiag_BreakerAdmissionAndRejection`. Dropping `MarkDispatchAttempted` is caught by
+`TestDispatchProbe_HttpSingle`, and dropping the inbound-trace hook by
+`TestHttpServer_ExecutionDiagnostics_InboundTraceIsLogOnly`. The `Forward`/`forward` rename
+fails loudly at compile time in either direction (duplicate or missing method).
 
 **Base-10 quantity tolerance.** Some upstreams return EVM quantities as base-10 strings
 instead of `0x`-prefixed hex, which broke upstream health tracking. `HexToUint64` /

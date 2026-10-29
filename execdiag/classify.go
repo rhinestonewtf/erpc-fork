@@ -162,6 +162,14 @@ func (c chain) is(targets ...error) bool {
 	return false
 }
 
+// emptyExhaustion reports an ErrUpstreamsExhausted that carries no upstream
+// error: every candidate was filtered out before invocation, so nothing was
+// tried (the same reading as common.IsRetryableTowardNetwork).
+func (c chain) emptyExhaustion() bool {
+	n := len(c.codes)
+	return n > 0 && len(c.joined) == 0 && c.codes[n-1] == common.ErrCodeUpstreamsExhausted
+}
+
 // classifyChain applies the ordered table to one linear chain. ok=false when
 // nothing in the chain matched (the caller decides the fallthrough).
 func classifyChain(c chain, dispatch string, isInvocation bool) (string, bool) {
@@ -170,7 +178,7 @@ func classifyChain(c chain, dispatch string, isInvocation bool) (string, bool) {
 		return ClassCancelled, true
 	case c.has(timeoutCodes) || c.is(common.ErrDynamicTimeoutExceeded, context.DeadlineExceeded):
 		return ClassTimeout, true
-	case c.has(rejectedCodes):
+	case c.has(rejectedCodes) || c.emptyExhaustion():
 		return ClassRejected, true
 	case c.has(skippedCodes):
 		return ClassSkipped, true
