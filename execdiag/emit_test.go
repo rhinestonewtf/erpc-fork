@@ -359,12 +359,12 @@ func TestUpstreamCall_RecordsEarlyReturnOnce(t *testing.T) {
 
 	// Early return before any invocation: recorded as a local rejection.
 	_, uc := BeginUpstreamCall(ctx, req, up, false)
-	uc.End(nil, common.NewErrUpstreamRateLimitRuleExceeded("rpc1", "b", "r"))
+	uc.End(common.NewErrUpstreamRateLimitRuleExceeded("rpc1", "b", "r"))
 
 	// Breaker rejection inside the call: identity comes from the call.
 	cctx, uc2 := BeginUpstreamCall(ctx, req, up, true)
 	RecordLocal(cctx, req, "", "", false, breakerErr(), "open", "method=*")
-	uc2.End(nil, breakerErr())
+	uc2.End(breakerErr())
 
 	recs := req.ExecState().Invocations()
 	require.Len(t, recs, 2)

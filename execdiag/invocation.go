@@ -70,7 +70,7 @@ func BeginUpstreamCall(ctx context.Context, req *common.NormalizedRequest, u com
 	return context.WithValue(ctx, upstreamCallKey{}, uc), uc
 }
 
-func (uc *UpstreamCall) End(_ *common.NormalizedResponse, err error) {
+func (uc *UpstreamCall) End(err error) {
 	if uc == nil || err == nil || uc.recorded.Load() {
 		return
 	}

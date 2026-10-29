@@ -17,7 +17,6 @@ func TestInvocationLedger_DisabledByDefault(t *testing.T) {
 	var nilSt *ExecState
 	nilSt.RecordInvocation(InvocationRecord{})
 	nilSt.InvocationStarted()
-	nilSt.InvocationEnded()
 	assert.Equal(t, 0, nilSt.InvocationsInflight())
 	assert.Nil(t, nilSt.Invocations())
 }
@@ -31,8 +30,7 @@ func TestInvocationLedger_Concurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			st.InvocationStarted()
-			st.RecordInvocation(InvocationRecord{UpstreamId: "u"})
-			st.InvocationEnded()
+			st.CompleteInvocation(InvocationRecord{UpstreamId: "u"})
 		}()
 	}
 	wg.Wait()

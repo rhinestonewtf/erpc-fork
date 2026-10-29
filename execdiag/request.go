@@ -185,13 +185,12 @@ func (s *RequestScope) capture(
 			snap.wonUpstream = u.Id()
 		}
 	}
-	snap.outcome = requestOutcome(err, finalClass, snap.path, records)
 	return snap
 }
 
-func requestOutcome(err error, finalClass, path string, records []common.InvocationRecord) string {
+func requestOutcome(hasError bool, finalClass, path string, records []common.InvocationRecord) string {
 	switch {
-	case err == nil || finalClass == ClassApplicationError:
+	case !hasError || finalClass == ClassApplicationError:
 		return "degraded"
 	case finalClass == ClassCancelled:
 		return "cancelled"

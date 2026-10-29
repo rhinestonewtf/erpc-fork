@@ -17,7 +17,7 @@ type requestSnapshot struct {
 	project, network, method, finality, user string
 	opID, parentID, leaderID                 string
 	trace                                    traceIDs
-	path, outcome                            string
+	path                                     string
 	finalClass, finalCode, finalCause        string
 	startedAt                                time.Time
 	duration                                 time.Duration
@@ -28,13 +28,24 @@ type requestSnapshot struct {
 }
 
 type classified struct {
-	rec      common.InvocationRecord
-	no       int
-	class    string
-	outcome  string
-	notable  bool
-	won      bool
-	priority int
+	rec     common.InvocationRecord
+	no      int
+	class   string
+	outcome string
+	notable bool
+	won     bool
+}
+
+// priority orders attempts for the per-request cap: won, notable, rest.
+func (c classified) priority() int {
+	switch {
+	case c.won:
+		return 0
+	case c.notable:
+		return 1
+	default:
+		return 2
+	}
 }
 
 // Unknown vendor names are synthesized from endpoint hosts upstream.
@@ -66,16 +77,6 @@ func classifyRecords(records []common.InvocationRecord, wonUpstream string) []cl
 	if wonIdx >= 0 {
 		out[wonIdx].won = true
 	}
-	for i := range out {
-		switch {
-		case out[i].won:
-			out[i].priority = 0
-		case out[i].notable:
-			out[i].priority = 1
-		default:
-			out[i].priority = 2
-		}
-	}
 	return out
 }
 
@@ -89,7 +90,7 @@ func selectAttempts(all []classified, max int) []classified {
 	for i := range idx {
 		idx[i] = i
 	}
-	sort.SliceStable(idx, func(a, b int) bool { return all[idx[a]].priority < all[idx[b]].priority })
+	sort.SliceStable(idx, func(a, b int) bool { return all[idx[a]].priority() < all[idx[b]].priority() })
 	idx = idx[:max]
 	sort.Ints(idx)
 	out := make([]classified, len(idx))
@@ -102,12 +103,8 @@ func selectAttempts(all []classified, max int) []classified {
 func (e *emitter) writeRequest(s requestSnapshot, records []common.InvocationRecord, inflight int) {
 	all := classifyRecords(records, s.wonUpstream)
 	selected := selectAttempts(all, min(e.maxAttempts, s.attemptBudget))
-	if s.hasError && s.finalClass != ClassApplicationError && s.finalClass != ClassCancelled {
-		s.outcome = "failed"
-		if s.path == pathForward && !anyDispatched(records) {
-			s.outcome = "rejected"
-		}
-	}
+	// Computed here, not at Finish, because late invocations can dispatch.
+	outcome := requestOutcome(s.hasError, s.finalClass, s.path, records)
 
 	dispatches, unknown := 0, 0
 	counts := map[string]int{}
@@ -131,7 +128,7 @@ func (e *emitter) writeRequest(s requestSnapshot, records []common.InvocationRec
 	}
 
 	level := zerolog.InfoLevel
-	if s.outcome == "failed" || s.outcome == "rejected" {
+	if outcome == "failed" || outcome == "rejected" {
 		level = zerolog.WarnLevel
 	}
 	omitted := len(all) - len(selected)
@@ -154,7 +151,7 @@ func (e *emitter) writeRequest(s requestSnapshot, records []common.InvocationRec
 		ev = ev.Str("user_id", s.user)
 	}
 	ev = ev.Str("path", s.path).
-		Str("outcome", s.outcome)
+		Str("outcome", outcome)
 	if s.finalCode != "" {
 		ev = ev.Str("final_class", s.finalClass).
 			Str("final_error_code", s.finalCode).

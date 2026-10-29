@@ -2805,7 +2805,7 @@ func (n *Network) doForward(execSpanCtx context.Context, u common.Upstream, req 
 	// If not handled, then fallback to the normal forward
 	ectx, uc := execdiag.BeginUpstreamCall(execSpanCtx, req, u, isHedgeAttempt)
 	resp, err := u.Forward(ectx, req, false, isHedgeAttempt)
-	uc.End(resp, err)
+	uc.End(err)
 	if h != nil {
 		return h.HandleUpstreamPostForward(execSpanCtx, n, u, req, resp, err, skipCacheRead)
 	}

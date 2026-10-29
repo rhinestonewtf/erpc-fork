@@ -15,19 +15,12 @@ type DispatchProbe struct {
 
 type dispatchProbeCtxKey struct{}
 
-// probesInUse keeps client marks at one atomic load (no context walk) for
-// processes that never install a probe.
-var probesInUse atomic.Bool
-
 func WithDispatchProbe(ctx context.Context, p *DispatchProbe) context.Context {
-	if !probesInUse.Load() {
-		probesInUse.Store(true)
-	}
 	return context.WithValue(ctx, dispatchProbeCtxKey{}, p)
 }
 
 func dispatchProbeFrom(ctx context.Context) *DispatchProbe {
-	if ctx == nil || !probesInUse.Load() {
+	if ctx == nil {
 		return nil
 	}
 	p, _ := ctx.Value(dispatchProbeCtxKey{}).(*DispatchProbe)

@@ -91,21 +91,14 @@ func (s *ExecState) CompleteInvocation(r InvocationRecord) {
 	s.ledgerMu.Unlock()
 }
 
-// InvocationStarted / InvocationEnded track invocations still running, so
-// emission can tell late hedge losers apart from invocations that never ran.
-// Callers must pair them.
+// InvocationStarted tracks an invocation still running, so emission can tell
+// late hedge losers apart from invocations that never ran. Callers must pair
+// it with CompleteInvocation.
 func (s *ExecState) InvocationStarted() {
 	if s == nil {
 		return
 	}
 	s.ledgerInflight.Add(1)
-}
-
-func (s *ExecState) InvocationEnded() {
-	if s == nil {
-		return
-	}
-	s.ledgerInflight.Add(-1)
 }
 
 func (s *ExecState) InvocationsInflight() int {
