@@ -9,7 +9,8 @@ import (
 
 // Forward wraps the network forward with an execution diagnostics scope, so
 // every upstream invocation of the request lands in one ledger and notable
-// requests emit their evidence on completion.
+// requests emit their evidence on completion. Client requests already carry
+// the project-level scope (PreparedProject.doForward); this one then no-ops.
 func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 	ctx, d := execdiag.BeginRequest(ctx, req, n.projectId, n.networkId)
 	resp, err := n.forward(ctx, req)

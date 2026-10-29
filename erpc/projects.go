@@ -11,6 +11,7 @@ import (
 	"github.com/erpc/erpc/architecture/evm/integrity"
 	"github.com/erpc/erpc/auth"
 	"github.com/erpc/erpc/common"
+	"github.com/erpc/erpc/execdiag"
 	"github.com/erpc/erpc/internal/policy"
 	"github.com/erpc/erpc/telemetry"
 	"github.com/erpc/erpc/upstream"
@@ -354,7 +355,12 @@ func (p *PreparedProject) Forward(ctx context.Context, networkId string, nq *com
 	return nil, err
 }
 
-func (p *PreparedProject) doForward(ctx context.Context, network *Network, nq *common.NormalizedRequest) (*common.NormalizedResponse, error) {
+func (p *PreparedProject) doForward(ctx context.Context, network *Network, nq *common.NormalizedRequest) (resp *common.NormalizedResponse, err error) {
+	// Scoped here, not in Network.Forward, so diagnostics see the client's
+	// outcome after network post-forward recovery (e.g. getLogs splitting).
+	ctx, d := execdiag.BeginRequest(ctx, nq, network.projectId, network.networkId)
+	defer func() { d.Finish(ctx, resp, err) }()
+
 	h := network.architectureHandler
 	if h != nil {
 		// Early, project-level pre-forward (cache-affecting, upstream-agnostic)
@@ -364,7 +370,7 @@ func (p *PreparedProject) doForward(ctx context.Context, network *Network, nq *c
 	}
 
 	// If not handled, then fallback to the normal forward
-	resp, err := network.Forward(ctx, nq)
+	resp, err = network.Forward(ctx, nq)
 	if h != nil {
 		return h.HandleNetworkPostForward(ctx, network, nq, resp, err)
 	}

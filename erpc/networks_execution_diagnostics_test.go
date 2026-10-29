@@ -729,3 +729,45 @@ func TestExecutionDiagnostics_UpstreamPostHookRejection(t *testing.T) {
 	assert.Equal(t, "provider_error", rejected.str("class"))
 	assert.Equal(t, "ErrEndpointContentValidation", rejected.str("cause"))
 }
+
+// recoveringNetworkPostForward turns a failed network forward into a success,
+// the way getLogs split-on-error recovery does.
+type recoveringNetworkPostForward struct {
+	common.ArchitectureHandler
+}
+
+func (recoveringNetworkPostForward) HandleNetworkPostForward(_ context.Context, _ common.Network, req *common.NormalizedRequest, resp *common.NormalizedResponse, err error) (*common.NormalizedResponse, error) {
+	if err == nil {
+		return resp, nil
+	}
+	jrr, jerr := common.NewJsonRpcResponse(req.ID(), "0x1", nil)
+	if jerr != nil {
+		return nil, jerr
+	}
+	return common.NewNormalizedResponse().WithRequest(req).WithJsonRpcResponse(jrr), nil
+}
+
+func TestExecutionDiagnostics_OutcomeIsAfterNetworkPostForward(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForEvmStatePoller()
+	unavailable := map[string]interface{}{"error": map[string]interface{}{"message": "unavailable"}}
+	diagMock("http://rpc1.localhost", 0, 503, nil).JSON(unavailable)
+	diagMock("http://rpc2.localhost", 0, 503, nil).JSON(unavailable)
+
+	buf := execdiag.ConfigureForTest(t, nil)
+	dumpOnFailure(t, buf)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	network := setupTestNetwork(t, ctx, diagUpstreams(), diagNetworkConfig(diagRetry(1)))
+	network.architectureHandler = recoveringNetworkPostForward{network.architectureHandler}
+
+	_, err := (&PreparedProject{}).doForward(ctx, network, common.NewNormalizedRequest([]byte(diagBalanceReq)))
+	require.NoError(t, err)
+
+	sums := diagFilter(diagEvents(t, buf), "rpc.request.completed")
+	require.Len(t, sums, 1, "one scope for the client request")
+	assert.Equal(t, "degraded", sums[0].str("outcome"), "the client got a result")
+	assert.NotContains(t, sums[0], "final_class")
+	assert.Equal(t, 2, sums[0].num("dispatches"))
+}
