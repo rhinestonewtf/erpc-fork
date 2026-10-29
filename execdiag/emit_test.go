@@ -375,7 +375,7 @@ func TestUpstreamCall_PostForwardChargesTheReturnedResponse(t *testing.T) {
 	ConfigureForTest(t, nil)
 	req := newReq()
 	ctx, _ := BeginRequest(context.Background(), req, "main", "evm:1")
-	uctx, uc := BeginUpstreamCall(ctx, req, common.NewFakeUpstream("rpc1"), false)
+	uctx, uc := BeginUpstreamCall(ctx, req, common.NewFakeUpstream("rpc1"))
 	winner, loser := common.NewNormalizedResponse(), common.NewNormalizedResponse()
 
 	// The returned (winning) leg finishes first; the loser finishes last.
@@ -400,11 +400,11 @@ func TestUpstreamCall_RecordsEarlyReturnOnce(t *testing.T) {
 	up := common.NewFakeUpstream("rpc1")
 
 	// Early return before any invocation: recorded as a local rejection.
-	_, uc := BeginUpstreamCall(ctx, req, up, false)
+	_, uc := BeginUpstreamCall(ctx, req, up)
 	uc.End(common.NewErrUpstreamRateLimitRuleExceeded("rpc1", "b", "r"))
 
 	// Breaker rejection inside the call: identity comes from the call.
-	cctx, uc2 := BeginUpstreamCall(ctx, req, up, true)
+	cctx, uc2 := BeginUpstreamCall(WithHedgeLeg(ctx), req, up)
 	RecordLocal(cctx, req, "", "", false, breakerErr(), "open", "method=*")
 	uc2.End(breakerErr())
 

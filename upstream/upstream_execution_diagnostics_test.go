@@ -65,7 +65,7 @@ func TestExecDiag_BreakerAdmissionAndRejection(t *testing.T) {
 	require.NotNil(t, scope)
 	ctx = context.WithValue(ctx, diagReqKey{}, req)
 	call := func(inner func(context.Context, bool) (*common.NormalizedResponse, error)) error {
-		cctx, uc := execdiag.BeginUpstreamCall(ctx, req, common.NewFakeUpstream("rpc1"), false)
+		cctx, uc := execdiag.BeginUpstreamCall(ctx, req, common.NewFakeUpstream("rpc1"))
 		_, err := ex.callBreakerWithTimeout(cctx, req, inner, false)
 		uc.End(err)
 		return err

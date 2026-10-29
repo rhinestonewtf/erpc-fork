@@ -39,6 +39,18 @@ type UpstreamCall struct {
 
 type upstreamCallKey struct{}
 
+type hedgeLegKey struct{}
+
+// WithHedgeLeg marks ctx as a network-level hedge leg (not the primary).
+func WithHedgeLeg(ctx context.Context) context.Context {
+	return context.WithValue(ctx, hedgeLegKey{}, true)
+}
+
+func isHedgeLeg(ctx context.Context) bool {
+	v, _ := ctx.Value(hedgeLegKey{}).(bool)
+	return v
+}
+
 func ledgerFor(req *common.NormalizedRequest) *common.ExecState {
 	if active.Load() == nil || req == nil {
 		return nil
@@ -58,11 +70,14 @@ func upstreamCallFrom(ctx context.Context, req *common.NormalizedRequest) *Upstr
 	return uc
 }
 
-func BeginUpstreamCall(ctx context.Context, req *common.NormalizedRequest, u common.Upstream, isHedgeAttempt bool) (context.Context, *UpstreamCall) {
+// BeginUpstreamCall opens the scope for one network-layer upstream call. Hedge
+// attribution comes from the per-leg WithHedgeLeg tag on ctx.
+func BeginUpstreamCall(ctx context.Context, req *common.NormalizedRequest, u common.Upstream) (context.Context, *UpstreamCall) {
 	st := ledgerFor(req)
 	if st == nil || u == nil {
 		return ctx, nil
 	}
+	isHedgeAttempt := isHedgeLeg(ctx)
 	snap := st.Snapshot()
 	uc := &UpstreamCall{
 		req:        req,
@@ -143,6 +158,7 @@ func BeginInvocation(ctx context.Context, req *common.NormalizedRequest, u commo
 	if st == nil || u == nil {
 		return ctx, nil
 	}
+	isHedge = isHedge || isHedgeLeg(ctx)
 	uc := upstreamCallFrom(ctx, req)
 	if uc != nil {
 		uc.recorded.Store(true)
@@ -205,6 +221,7 @@ func RecordLocal(ctx context.Context, req *common.NormalizedRequest, upstreamId,
 	if st == nil {
 		return
 	}
+	isHedge = isHedge || isHedgeLeg(ctx)
 	if uc := upstreamCallFrom(ctx, req); uc != nil {
 		uc.recorded.Store(true)
 		if upstreamId == "" {

@@ -12,6 +12,7 @@ import (
 	"github.com/erpc/erpc/architecture/evm"
 	"github.com/erpc/erpc/architecture/svm"
 	"github.com/erpc/erpc/common"
+	"github.com/erpc/erpc/execdiag"
 	"github.com/erpc/erpc/failsafe"
 	"github.com/erpc/erpc/telemetry"
 	"github.com/rs/zerolog"
@@ -659,8 +660,12 @@ func (e *networkExecutor) runHedge(
 	}
 	var fireCount atomic.Int32
 	wrapInner := func(hctx context.Context) (*common.NormalizedResponse, error) {
-		idx := fireCount.Add(1)
-		_ = idx // hedge tag could be carried via a typed context value
+		// Per-leg hedge tag for diagnostics; same first-call-is-primary rule as
+		// the upstream executor. The request-global hedge counter cannot tell
+		// a later round's primary from a hedge.
+		if idx := fireCount.Add(1); idx > 1 {
+			hctx = execdiag.WithHedgeLeg(hctx)
+		}
 		return inner(hctx, req)
 	}
 	keep := func(r *common.NormalizedResponse, err error) bool {

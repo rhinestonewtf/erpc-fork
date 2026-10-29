@@ -2797,7 +2797,7 @@ func (n *Network) GetFinality(ctx context.Context, req *common.NormalizedRequest
 func (n *Network) doForward(execSpanCtx context.Context, u common.Upstream, req *common.NormalizedRequest, skipCacheRead, isHedgeAttempt bool) (*common.NormalizedResponse, error) {
 	h := n.architectureHandler
 	// Opened before the pre-hook so its handled no-dispatch failures are recorded too.
-	ectx, uc := execdiag.BeginUpstreamCall(execSpanCtx, req, u, isHedgeAttempt)
+	ectx, uc := execdiag.BeginUpstreamCall(execSpanCtx, req, u)
 	if h != nil {
 		if handled, resp, err := h.HandleUpstreamPreForward(ectx, n, u, req, skipCacheRead); handled {
 			resp, err = h.HandleUpstreamPostForward(execSpanCtx, n, u, req, resp, err, skipCacheRead)

@@ -448,6 +448,47 @@ func TestExecutionDiagnostics_HedgeCancellation(t *testing.T) {
 		assert.Equal(t, "hedge", hedgeLeg.str("selection_reason"))
 		assert.Equal(t, true, diagAttemptFor(t, attempts, "rpc1")["won"])
 	})
+
+	t.Run("RetriedRoundPrimaryIsNotAHedge", func(t *testing.T) {
+		util.ResetGock()
+		defer util.ResetGock()
+		util.SetupMocksForEvmStatePoller()
+		unavailable := map[string]interface{}{"error": map[string]interface{}{"message": "unavailable"}}
+		diagMock("http://rpc1.localhost", 1, 503, nil).Delay(150 * time.Millisecond).JSON(unavailable)
+		diagMock("http://rpc2.localhost", 1, 503, nil).JSON(unavailable)
+		diagOk("http://rpc1.localhost", 0, nil)
+		diagOk("http://rpc2.localhost", 0, nil)
+
+		buf := execdiag.ConfigureForTest(t, nil)
+		dumpOnFailure(t, buf)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		cfg := hedgeNetwork()
+		cfg.Failsafe[0].Retry = &common.RetryPolicyConfig{MaxAttempts: 2}
+		network := setupTestNetwork(t, ctx, diagUpstreams(), cfg)
+
+		_, err := network.Forward(ctx, common.NewNormalizedRequest([]byte(diagBalanceReq)))
+		require.NoError(t, err)
+
+		require.Eventually(t, func() bool {
+			return len(diagFilter(diagEvents(t, buf), "rpc.request.completed")) == 1
+		}, 2*time.Second, 10*time.Millisecond)
+		evs := diagEvents(t, buf)
+		sum := diagFilter(evs, "rpc.request.completed")[0]
+		require.Greater(t, sum.num("hedges"), 0)
+		var hedged, laterPrimary bool
+		for _, a := range diagAttemptsOf(evs, sum.str("operational_request_id")) {
+			if a["hedge"] == true && a["retry"] != true {
+				hedged = true
+			}
+			if a["retry"] == true && a["hedge"] != true {
+				laterPrimary = true
+				assert.Equal(t, "retry", a.str("selection_reason"))
+			}
+		}
+		assert.True(t, hedged, "round 1 fired a hedge")
+		assert.True(t, laterPrimary, "round 2's primary is not attributed to round 1's hedge")
+	})
 }
 
 func TestExecutionDiagnostics_HalfOpenRecovery(t *testing.T) {
