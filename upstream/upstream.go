@@ -20,6 +20,7 @@ import (
 	"github.com/erpc/erpc/clients"
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/data"
+	"github.com/erpc/erpc/execdiag"
 	"github.com/erpc/erpc/failsafe"
 	"github.com/erpc/erpc/health"
 	"github.com/erpc/erpc/telemetry"
@@ -316,6 +317,8 @@ func NewUpstream(
 	} else {
 		pup.Client = client
 	}
+
+	wireBreakerDiagnostics(pup)
 
 	lg.Debug().Msgf("prepared upstream")
 
@@ -639,6 +642,9 @@ func (u *Upstream) Forward(ctx context.Context, nrq *common.NormalizedRequest, b
 			ctx context.Context,
 			isHedge bool,
 		) (resp *common.NormalizedResponse, retErr error) {
+			// Before SendRequest so the client sees the dispatch probe.
+			ctx, inv := execdiag.BeginInvocation(ctx, nrq, u, isHedge)
+			defer func() { inv.End(resp, retErr) }()
 			st := nrq.ExecState()
 			snap := st.Snapshot()
 			attemptStart := time.Now()

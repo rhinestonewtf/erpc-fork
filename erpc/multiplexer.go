@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/erpc/erpc/common"
+	"github.com/erpc/erpc/execdiag"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -24,6 +25,8 @@ type Multiplexer struct {
 	copyWg sync.WaitGroup
 	// closed is set when cleanup starts; prevents new followers from registering
 	closed bool
+	// diagScope is the leader's diagnostics scope, linked from followers.
+	diagScope *execdiag.RequestScope
 }
 
 func NewMultiplexer(hash string) *Multiplexer {

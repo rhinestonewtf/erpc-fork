@@ -152,6 +152,7 @@ func (c *GenericHttpJsonRpcClient) GetType() ClientType {
 }
 
 func (c *GenericHttpJsonRpcClient) SendRequest(ctx context.Context, req *common.NormalizedRequest) (*common.NormalizedResponse, error) {
+	common.MarkDispatchObserved(ctx)
 	if !c.supportsBatch {
 		return c.sendSingleRequest(ctx, req)
 	}
@@ -337,10 +338,16 @@ func (c *GenericHttpJsonRpcClient) processBatch(alreadyLocked bool) {
 		c.logger.Debug().Msgf("processing batch with %d requests", len(c.batchRequests))
 	}
 	requests := c.batchRequests
+	// Marked under batchMu before the cancellation sweep: a caller cancelled
+	// after the sweep is still sent, so it must not read back as "none".
+	for _, br := range requests {
+		common.MarkDispatchPending(br.ctx)
+	}
 	// Drop any requests that have been canceled before we go out to the network
 	for id, br := range requests {
 		if err := br.ctx.Err(); err != nil {
 			delete(requests, id)
+			common.MarkDispatchDropped(br.ctx)
 			if cause := context.Cause(br.ctx); cause != nil {
 				err = cause
 			}
@@ -376,6 +383,7 @@ func (c *GenericHttpJsonRpcClient) processBatch(alreadyLocked bool) {
 		jrReq, err := req.request.JsonRpcRequest()
 		c.logger.Trace().Interface("id", req.request.ID()).Str("method", jrReq.Method).Msgf("preparing batch request")
 		if err != nil {
+			common.MarkDispatchDropped(req.ctx)
 			req.err <- common.NewErrUpstreamRequest(
 				err,
 				c.upstream,
@@ -405,6 +413,7 @@ func (c *GenericHttpJsonRpcClient) processBatch(alreadyLocked bool) {
 	}
 	if err != nil {
 		for _, req := range requests {
+			common.MarkDispatchDropped(req.ctx)
 			req.err <- err
 		}
 		return
@@ -414,6 +423,7 @@ func (c *GenericHttpJsonRpcClient) processBatch(alreadyLocked bool) {
 	httpReq, err := c.prepareRequest(batchCtx, requestBody)
 	if err != nil {
 		for _, req := range requests {
+			common.MarkDispatchDropped(req.ctx)
 			req.err <- &common.BaseError{
 				Code:    "ErrHttp",
 				Message: fmt.Sprintf("%v", err),
@@ -432,6 +442,9 @@ func (c *GenericHttpJsonRpcClient) processBatch(alreadyLocked bool) {
 
 	c.logger.Debug().Str("host", c.Url.Host).RawJSON("request", requestBody).Interface("headers", httpReq.Header).Msgf("sending json rpc POST request (batch)")
 
+	for _, br := range requests {
+		common.MarkDispatchAttempted(br.ctx)
+	}
 	// pick the client from the proxy pool registry (if configured) or fallback
 	resp, err := c.getHttpClient().Do(httpReq)
 	if err != nil {
@@ -735,6 +748,7 @@ func (c *GenericHttpJsonRpcClient) sendSingleRequest(ctx context.Context, req *c
 
 	c.logger.Debug().Str("host", c.Url.Host).RawJSON("request", requestBody).Interface("headers", httpReq.Header).Msg("sending json rpc POST request (single)")
 
+	common.MarkDispatchAttempted(ctx)
 	resp, err := c.getHttpClient().Do(httpReq)
 	if err != nil {
 		cause := effectiveCause(ctx)

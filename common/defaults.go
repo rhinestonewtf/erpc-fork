@@ -70,6 +70,10 @@ func (c *Config) SetDefaults(opts *DefaultOptions) error {
 			return err
 		}
 	}
+	if c.ExecutionDiagnostics == nil {
+		c.ExecutionDiagnostics = &ExecutionDiagnosticsConfig{}
+	}
+	c.ExecutionDiagnostics.SetDefaults()
 
 	if c.Database != nil {
 		if err := c.Database.SetDefaults(c.ClusterKey); err != nil {

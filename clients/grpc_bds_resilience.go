@@ -16,6 +16,7 @@ import (
 
 	"github.com/blockchain-data-standards/manifesto/evm"
 	"github.com/blockchain-data-standards/manifesto/svm"
+	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/telemetry"
 	"github.com/erpc/erpc/util"
 	"github.com/rs/zerolog"
@@ -150,9 +151,9 @@ type bdsPool struct {
 	// pool's own ChainId probes so an auth gateway in front of the server
 	// accepts them like any request. Atomic because SetHeaders may refresh it
 	// after construction.
-	md              atomic.Pointer[metadata.MD]
-	stopCh          chan struct{}
-	stopOnce        sync.Once
+	md       atomic.Pointer[metadata.MD]
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 // newBdsPool builds a round-robin pool of poolSize independent connections.
@@ -540,7 +541,10 @@ func callBounded(ctx context.Context, fn func(context.Context) error) error {
 }
 
 func callBoundedT[T any](ctx context.Context, fn func(context.Context) (T, error)) (T, error) {
-	return util.BoundedCallT(ctx, fn)
+	return util.BoundedCallT(ctx, func(ctx context.Context) (T, error) {
+		common.MarkDispatchAttempted(ctx)
+		return fn(ctx)
+	})
 }
 
 // pickTargetForBDS extracts the host:port, the method path prefix, and the TLS
