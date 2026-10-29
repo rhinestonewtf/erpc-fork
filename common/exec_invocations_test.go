@@ -2,6 +2,7 @@ package common
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
@@ -61,4 +62,33 @@ func TestDispatchProbe(t *testing.T) {
 	p2 := &DispatchProbe{}
 	MarkDispatchAttempted(WithDispatchProbe(context.Background(), p2))
 	assert.Equal(t, DispatchAttempted, p2.State())
+
+	// A batch-held call is never "none" until the batch drops it.
+	p3 := &DispatchProbe{}
+	ctx3 := WithDispatchProbe(context.Background(), p3)
+	MarkDispatchObserved(ctx3)
+	MarkDispatchPending(ctx3)
+	assert.Equal(t, DispatchUnknown, p3.State())
+	MarkDispatchDropped(ctx3)
+	assert.Equal(t, DispatchNone, p3.State())
+	MarkDispatchPending(ctx3)
+	MarkDispatchAttempted(ctx3)
+	assert.Equal(t, DispatchAttempted, p3.State())
+}
+
+func TestInvocationLedger_AmendError(t *testing.T) {
+	st := &ExecState{}
+	st.EnableInvocationLedger()
+	st.InvocationStarted()
+	idx := st.CompleteInvocation(InvocationRecord{UpstreamId: "u"})
+	first := errors.New("post-hook rejection")
+	st.AmendInvocationError(idx, first)
+	st.AmendInvocationError(idx, errors.New("later"))
+	st.AmendInvocationError(idx+1, first)
+	recs := st.Invocations()
+	assert.Len(t, recs, 1)
+	assert.Equal(t, first, recs[0].Err, "only an error-free record is amended, once")
+
+	off := &ExecState{}
+	assert.Equal(t, -1, off.CompleteInvocation(InvocationRecord{}))
 }

@@ -644,3 +644,47 @@ func TestExecutionDiagnostics_UpstreamPreHookRejection(t *testing.T) {
 		assert.Equal(t, "skipped", a.str("class"))
 	}
 }
+
+// rejectingPostForward fails rpc1's successful response in the post-forward
+// hook, the way an integrity check does.
+type rejectingPostForward struct {
+	common.ArchitectureHandler
+}
+
+func (h rejectingPostForward) HandleUpstreamPostForward(ctx context.Context, n common.Network, u common.Upstream, req *common.NormalizedRequest, resp *common.NormalizedResponse, err error, skipCacheRead bool) (*common.NormalizedResponse, error) {
+	if err == nil && u.Id() == "rpc1" {
+		return nil, common.NewErrEndpointContentValidation(errors.New("integrity violation"), u)
+	}
+	return h.ArchitectureHandler.HandleUpstreamPostForward(ctx, n, u, req, resp, err, skipCacheRead)
+}
+
+func TestExecutionDiagnostics_UpstreamPostHookRejection(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForEvmStatePoller()
+	var rpc1Calls, rpc2Calls atomic.Int32
+	diagOk("http://rpc1.localhost", 0, &rpc1Calls)
+	diagOk("http://rpc2.localhost", 0, &rpc2Calls)
+
+	buf := execdiag.ConfigureForTest(t, nil)
+	dumpOnFailure(t, buf)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	network := setupTestNetwork(t, ctx, diagUpstreams(), diagNetworkConfig(diagRetry(2)))
+	network.architectureHandler = rejectingPostForward{network.architectureHandler}
+
+	resp, err := network.Forward(ctx, common.NewNormalizedRequest([]byte(diagBalanceReq)))
+	require.NoError(t, err)
+	assert.Equal(t, "rpc2", resp.Upstream().Id())
+	require.Equal(t, int32(1), rpc1Calls.Load())
+
+	evs := diagEvents(t, buf)
+	sums := diagFilter(evs, "rpc.request.completed")
+	require.Len(t, sums, 1, "a recovered post-hook rejection is notable")
+	assert.Equal(t, 2, sums[0].num("invocations"))
+	assert.Equal(t, 2, sums[0].num("dispatches"))
+	rejected := diagAttemptFor(t, diagAttemptsOf(evs, sums[0].str("operational_request_id")), "rpc1")
+	assert.Equal(t, "attempted", rejected.str("dispatch"))
+	assert.Equal(t, "provider_error", rejected.str("class"))
+	assert.Equal(t, "ErrEndpointContentValidation", rejected.str("cause"))
+}

@@ -80,15 +80,30 @@ func (s *ExecState) InvocationSnapshot() ([]InvocationRecord, int) {
 }
 
 // CompleteInvocation publishes the record and retires its in-flight slot
-// atomically with respect to diagnostic snapshots.
-func (s *ExecState) CompleteInvocation(r InvocationRecord) {
+// atomically with respect to diagnostic snapshots. It returns the record's
+// index for AmendInvocationError, or -1 when the ledger is disabled.
+func (s *ExecState) CompleteInvocation(r InvocationRecord) int {
 	if !s.InvocationLedgerEnabled() {
+		return -1
+	}
+	s.ledgerMu.Lock()
+	defer s.ledgerMu.Unlock()
+	s.ledger = append(s.ledger, r)
+	s.ledgerInflight.Add(-1)
+	return len(s.ledger) - 1
+}
+
+// AmendInvocationError attaches an error found after the invocation returned
+// (a post-forward hook rejecting the response) to a record that had none.
+func (s *ExecState) AmendInvocationError(idx int, err error) {
+	if !s.InvocationLedgerEnabled() || err == nil {
 		return
 	}
 	s.ledgerMu.Lock()
-	s.ledger = append(s.ledger, r)
-	s.ledgerInflight.Add(-1)
-	s.ledgerMu.Unlock()
+	defer s.ledgerMu.Unlock()
+	if idx >= 0 && idx < len(s.ledger) && s.ledger[idx].Err == nil {
+		s.ledger[idx].Err = err
+	}
 }
 
 // InvocationStarted tracks an invocation still running, so emission can tell

@@ -2800,8 +2800,9 @@ func (n *Network) doForward(execSpanCtx context.Context, u common.Upstream, req 
 	ectx, uc := execdiag.BeginUpstreamCall(execSpanCtx, req, u, isHedgeAttempt)
 	if h != nil {
 		if handled, resp, err := h.HandleUpstreamPreForward(ectx, n, u, req, skipCacheRead); handled {
+			resp, err = h.HandleUpstreamPostForward(execSpanCtx, n, u, req, resp, err, skipCacheRead)
 			uc.End(err)
-			return h.HandleUpstreamPostForward(execSpanCtx, n, u, req, resp, err, skipCacheRead)
+			return resp, err
 		}
 	}
 
@@ -2809,7 +2810,9 @@ func (n *Network) doForward(execSpanCtx context.Context, u common.Upstream, req 
 	resp, err := u.Forward(ectx, req, false, isHedgeAttempt)
 	uc.End(err)
 	if h != nil {
-		return h.HandleUpstreamPostForward(execSpanCtx, n, u, req, resp, err, skipCacheRead)
+		fwdErr := err
+		resp, err = h.HandleUpstreamPostForward(execSpanCtx, n, u, req, resp, err, skipCacheRead)
+		uc.PostForward(fwdErr, err)
 	}
 	return resp, err
 }

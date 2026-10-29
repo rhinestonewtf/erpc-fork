@@ -28,6 +28,9 @@ type UpstreamCall struct {
 	netAttempt int
 	start      time.Time
 	recorded   atomic.Bool
+	// lastOk is the ledger index of the latest successful invocation under
+	// this call, i.e. the one whose response the post-forward hook inspects.
+	lastOk atomic.Int64
 }
 
 type upstreamCallKey struct{}
@@ -67,7 +70,21 @@ func BeginUpstreamCall(ctx context.Context, req *common.NormalizedRequest, u com
 		netAttempt: snap.NetworkAttempts,
 		start:      time.Now(),
 	}
+	uc.lastOk.Store(-1)
 	return context.WithValue(ctx, upstreamCallKey{}, uc), uc
+}
+
+// PostForward attributes a post-forward hook's rejection of a successful
+// response to the invocation that produced it.
+func (uc *UpstreamCall) PostForward(forwardErr, postErr error) {
+	if uc == nil || forwardErr != nil || postErr == nil {
+		return
+	}
+	if idx := uc.lastOk.Load(); idx >= 0 {
+		uc.req.ExecState().AmendInvocationError(int(idx), postErr)
+		return
+	}
+	uc.End(postErr)
 }
 
 func (uc *UpstreamCall) End(err error) {
@@ -101,6 +118,7 @@ type Invocation struct {
 	netAttempt int
 	breaker    breakerAdmission
 	start      time.Time
+	call       *UpstreamCall
 }
 
 // BeginInvocation installs a dispatch probe for the transport client and
@@ -110,12 +128,14 @@ func BeginInvocation(ctx context.Context, req *common.NormalizedRequest, u commo
 	if st == nil || u == nil {
 		return ctx, nil
 	}
-	if uc := upstreamCallFrom(ctx, req); uc != nil {
+	uc := upstreamCallFrom(ctx, req)
+	if uc != nil {
 		uc.recorded.Store(true)
 		isHedge = isHedge || uc.isHedge
 	}
 	snap := st.Snapshot()
 	inv := &Invocation{
+		call:       uc,
 		st:         st,
 		probe:      &common.DispatchProbe{},
 		upstreamId: u.Id(),
@@ -138,7 +158,7 @@ func (inv *Invocation) End(err error) {
 	if inv == nil {
 		return
 	}
-	inv.st.CompleteInvocation(common.InvocationRecord{
+	idx := inv.st.CompleteInvocation(common.InvocationRecord{
 		UpstreamId:      inv.upstreamId,
 		VendorName:      inv.vendor,
 		StartedAt:       inv.start,
@@ -152,6 +172,9 @@ func (inv *Invocation) End(err error) {
 		BreakerState:    inv.breaker.state,
 		BreakerScope:    inv.breaker.scope,
 	})
+	if err == nil && idx >= 0 && inv.call != nil {
+		inv.call.lastOk.Store(int64(idx))
+	}
 }
 
 // RecordLocal records an invocation that was refused before reaching the
