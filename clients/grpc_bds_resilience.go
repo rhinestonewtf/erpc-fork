@@ -151,9 +151,9 @@ type bdsPool struct {
 	// pool's own ChainId probes so an auth gateway in front of the server
 	// accepts them like any request. Atomic because SetHeaders may refresh it
 	// after construction.
-	md              atomic.Pointer[metadata.MD]
-	stopCh          chan struct{}
-	stopOnce        sync.Once
+	md       atomic.Pointer[metadata.MD]
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 // newBdsPool builds a round-robin pool of poolSize independent connections.
