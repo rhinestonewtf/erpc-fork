@@ -137,6 +137,8 @@ type ExecState struct {
 	// the slice is safe across concurrent participant goroutines.
 	upstreamMu       sync.Mutex
 	upstreamAttempts []UpstreamAttempt
+
+	invocationLedger
 }
 
 // RecordUpstreamAttempt appends a participant record. Called by the

@@ -234,6 +234,7 @@ export interface Config {
   indexer?: IndexerConfig;
   proxyPools?: (ProxyPoolConfig | undefined)[];
   tracing?: TracingConfig;
+  executionDiagnostics?: ExecutionDiagnosticsConfig;
 }
 /**
  * IndexerConfig tunes the event-stream indexer behind eth_subscribe fan-out.
@@ -2275,6 +2276,25 @@ export const RateLimitStoreFailureDeny: RateLimitStoreFailureMode = "deny";
  * counts every request, at maxCount × localLimitFactor.
  */
 export const RateLimitStoreFailureLocal: RateLimitStoreFailureMode = "local";
+
+//////////
+// source: config_execution_diagnostics.go
+
+export const DefaultExecutionDiagnosticsMaxEventsPerSecond = 10;
+export const DefaultExecutionDiagnosticsBurst = 100;
+export const DefaultExecutionDiagnosticsMaxAttemptEventsPerRequest = 8;
+/**
+ * ExecutionDiagnosticsConfig controls the payload-free execution diagnostics
+ * log stream (per-request upstream invocation evidence and breaker
+ * transitions). The stream is independent of logLevel; its volume is bounded
+ * per replica by a token bucket counted in log lines.
+ */
+export interface ExecutionDiagnosticsConfig {
+  enabled?: boolean;
+  maxEventsPerSecond?: number /* float64 */;
+  burst?: number /* int */;
+  maxAttemptEventsPerRequest?: number /* int */;
+}
 
 //////////
 // source: config_integrity.go

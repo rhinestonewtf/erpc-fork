@@ -11,6 +11,7 @@ import (
 	"github.com/erpc/erpc/architecture/svm"
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/data"
+	"github.com/erpc/erpc/execdiag"
 	"github.com/erpc/erpc/telemetry"
 	"github.com/erpc/erpc/util"
 	"github.com/prometheus/client_golang/prometheus"
@@ -26,6 +27,7 @@ func Init(
 	//
 	// 1) Set the right log level depending on the configuration
 	//
+	baseLogger := logger
 	level, err := zerolog.ParseLevel(cfg.LogLevel)
 	if err != nil {
 		logger.Warn().Msgf("invalid log level '%s', defaulting to 'debug': %s", cfg.LogLevel, err)
@@ -33,6 +35,9 @@ func Init(
 	} else {
 		logger = logger.Level(level)
 	}
+	// Diagnostics derive from the logger before logLevel applies: the stream
+	// is payload-free and must not be gated by the configured level.
+	execdiag.Configure(appCtx, cfg.ExecutionDiagnostics, baseLogger, &logger)
 
 	if logger.GetLevel() <= zerolog.InfoLevel {
 		finalCfgJson, err := common.SonicCfg.Marshal(cfg)

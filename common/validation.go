@@ -34,6 +34,11 @@ func (c *Config) Validate() error {
 			return err
 		}
 	}
+	if c.ExecutionDiagnostics != nil {
+		if err := c.ExecutionDiagnostics.Validate(); err != nil {
+			return err
+		}
+	}
 	if c.Admin != nil {
 		if err := c.Admin.Validate(); err != nil {
 			return err
