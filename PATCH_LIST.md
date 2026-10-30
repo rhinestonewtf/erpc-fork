@@ -3,12 +3,14 @@
 Every change this fork carries on top of upstream `erpc/erpc`. **This file is the
 source of truth for what "our patches" are.**
 
-Workflow: the patch itself goes in through a PR and is squash-merged; its row here is
+Workflow: the patch itself goes in through a PR and is **squash-merged**; its row here is
 then committed **directly to `main`**, because the squash hash does not exist until
-after the merge. If you drop a patch, move it to [Removed](#removed-patches) with the
+after the merge. Fork PRs #20 and #21 were merged with merge commits instead (13
+commits), and the 0.5.0 sync collapsed them to one commit per PR; squash at merge time
+so a sync does not have to. If you drop a patch, move it to [Removed](#removed-patches) with the
 reason.
 
-Currently rebased onto upstream **`0.4.0`** (`120c35e1`, released 2026-10-11).
+Currently rebased onto upstream **`0.5.0`** (`204f98cb`, released 2026-10-27).
 
 ## Why this file exists
 
@@ -23,7 +25,7 @@ Currently rebased onto upstream **`0.4.0`** (`120c35e1`, released 2026-10-11).
   dropped a merged code fix two days after it landed, and nobody noticed for six months,
   because the working mental model was "our patches are the CI and config ones".
 
-That last point is why `301093f3` deserves a warning: it is named *"update prod
+That last point is why `b85410ad` deserves a warning: it is named *"update prod
 config"* but also carries a Go code patch. Do not assume a commit's subject tells
 you whether it touches code.
 
@@ -41,15 +43,13 @@ grep -q "isTerminalGasLimitRejection" architecture/evm/error_normalizer.go && ec
 grep -q "terminalGasLimitRejections" architecture/evm/gas_limit_errors.go && echo OK
 grep -q 'strconv.ParseUint(s, 10, 64)' common/utils.go && echo OK
 grep -q "resolveRateLimiterRedisTarget" upstream/ratelimiter_registry.go && echo OK
-grep -q "common.CorroboratedHead(" health/tracker.go && echo OK
-grep -q "common.CorroboratedHead(" erpc/networks.go && echo OK
-grep -q "pollFinalizedBlockNumberScheduled" architecture/evm/evm_state_poller.go && echo OK
 grep -q "BlockTimestamp" data/connector.go && echo OK
 grep -q "latestBlockShared.TryUpdateIfStale(" architecture/evm/evm_state_poller.go && echo OK
 grep -q "cacheBlockByHash(" architecture/evm/evm_state_poller.go && echo OK
 grep -B1 "cacheBlockByHash(" architecture/evm/evm_state_poller.go | grep -q 'blockTag == "latest"' && echo OK
 grep -q "hub.hashFor(" erpc/block_stream.go && echo OK
 grep -q "BlockHash" data/connector.go && echo OK
+! grep -rqE 'processNewValue\([A-Za-z]+, [a-z]+\.Value\)|OnLatestBlock\(func\(int64\)\)' --include='*.go' . && echo OK
 test -f erpc-prod.yaml && echo OK
 test -f buildspec-amd64.yml && echo OK
 test -f buildspec-arm64.yml && echo OK
@@ -57,15 +57,30 @@ test -f .github/workflows/docker.yaml && echo OK
 test -f sync-with-upstream.sh && echo OK
 test -f PATCH_LIST.md && echo OK
 grep -q "This is a fork" CLAUDE.md && echo OK
+grep -q "execdiag.Configure(" erpc/init.go && echo OK
+grep -q "execdiag.BeginRequest(" erpc/projects.go && echo OK
+grep -q "execdiag.BeginUpstreamCall(" erpc/networks.go && echo OK
+grep -q "execdiag.BeginInvocation(" upstream/upstream.go && echo OK
+grep -q "recordBreakerRejection(" upstream/upstream_executor.go && echo OK
+grep -q "MarkDispatchAttempted(" clients/http_json_rpc_client.go && echo OK
 ```
 
 A rebase that reports success while a probe fails means the patch was dropped during
 conflict resolution. Recover it from the pre-rebase `main` in the reflog
 (`git reflog main`), not from a rewritten branch.
 
-Go patches also need `go test ./architecture/evm/... ./common/... ./health/... ./data/...` to pass — a patch
-can survive a rebase textually and still be defeated by upstream logic that moved
-around it.
+Go patches also need `go test ./architecture/evm/... ./common/... ./health/... ./data/... ./upstream/... ./clients/... ./execdiag/... ./erpc/...`
+to pass — a patch can survive a rebase textually and still be defeated by upstream logic
+that moved around it. The `erpc` package takes ~20 minutes; run it anyway (the quick
+subset for the diagnostics patch is `-run 'ExecutionDiagnostics|ExecDiag|DispatchProbe'`
+over `./erpc/ ./upstream/ ./clients/`).
+
+RHI-8244 and RHI-8178 changed the shared counter's signatures (`CounterInt64Observation`
+in place of a bare `int64`), so **every counter call site upstream adds compiles only after
+adaptation**, and a rebase can auto-merge one that compiles wrong: 0.5.0 did it twice
+(`scheduleBackgroundPushCurrent` adopting a remote value, and the SVM
+`firstAvailableSlotShared` counter). The negative grep in the probe block is the check for
+the two known shapes; `go build ./...` is the other half.
 
 ## Active patches
 
@@ -73,14 +88,13 @@ around it.
 
 | Patch | Files | Probe |
 | -- | -- | -- |
-| `23ac203b` fix(evm): treat gas-limit rejections as terminal, not retryable (RHI-6277, #6) | `architecture/evm/gas_limit_errors.go`, `architecture/evm/gas_limit_errors_test.go`, `architecture/evm/error_normalizer.go` | `isTerminalGasLimitRejection` present in `error_normalizer.go` |
-| `301093f3` (part of "update prod config") base-10 EVM quantity tolerance | `common/utils.go` | `strconv.ParseUint(s, 10, 64)` in `common/utils.go` |
-| `ade471ae` fix(ratelimiter): parse rediss:// URI for the Redis store (RHI-6529, #9) | `upstream/ratelimiter_redis_target.go`, `upstream/ratelimiter_redis_target_test.go`, `upstream/ratelimiter_registry.go` | `resolveRateLimiterRedisTarget` called in `ratelimiter_registry.go` |
-| `a503823d` fix(health): serve the corroborated head within lag noise, capped (RHI-8079, #12, #13) | `common/head_noise_tolerance.go` (+ `_test`), call sites in `health/tracker.go` (head + block-time sample) and `erpc/networks.go`; new tests in `health/`, `erpc/`, `internal/policy/`; updated expectations in `health/tracker_*_test.go`, `erpc/networks_test.go`, `erpc/networks_served_tip_test.go`, `erpc/networks_selection_policy_realpoll_test.go`; `docs/pages/reference/evm/block-tracking.mdx` | `common.CorroboratedHead(` called in both `health/tracker.go` and `erpc/networks.go` |
-| `61db4a8e` feat(evm): debounce the finalized poll on finality period, not block time (RHI-8113, #14) | `architecture/evm/evm_state_poller_finalized_debounce.go` (+ `_test`), call sites in `architecture/evm/evm_state_poller.go`, `docs/pages/reference/evm/block-tracking.mdx` | `pollFinalizedBlockNumberScheduled` called in `evm_state_poller.go` |
-| `0fcffa82` feat(data): carry the block timestamp through shared state; latest poll back on the shared clock (RHI-8244) | `data/shared_state_observation.go` (+ `_test`; was `shared_state_block_timestamp.go` until RHI-8178 generalised it), `architecture/evm/evm_state_poller_shared_clock_test.go`; signature changes in `data/connector.go`, `data/shared_state_variable.go`, call sites in `architecture/evm/evm_state_poller.go`, `architecture/svm/svm_state_poller.go`, `upstream/upstream.go`; `docs/pages/reference/evm/block-tracking.mdx` | `BlockTimestamp` in `data/connector.go`, and `latestBlockShared.TryUpdateIfStale(` (not `IfLocallyStale`) in `evm_state_poller.go` |
-| `39059069` feat(evm): cache the poller's block by hash and stream it by hash (RHI-8178) | `architecture/evm/evm_state_poller_block_cache.go` (+ `_test`), `data/shared_state_observation.go` (+ `_test`), hub + subscriber loop in `erpc/block_stream.go` (+ `_test`); call sites in `architecture/evm/evm_state_poller.go` (`fetchBlock`, `OnLatestBlock`), `erpc/projects_registry.go`, `data/connector.go`, `data/shared_state_variable.go`; signature adapters in `architecture/svm/svm_state_poller.go`, `upstream/upstream.go`; `docs/pages/reference/evm/block-tracking.mdx` | `cacheBlockByHash(` called in `evm_state_poller.go`, `hub.hashFor(` used in `erpc/block_stream.go`, `BlockHash` in `data/connector.go` |
-| `fc23439a` fix(evm): cache only the poller's latest fetch by hash, not the finalized one (RHI-8260, #17) — **fold into the RHI-8178 commit at the next sync** | one condition at the `cacheBlockByHash` call site in `architecture/evm/evm_state_poller.go`, `evm_state_poller_block_cache.go` comment, `TestPollFinalizedBlock_IsNotCachedByHash` | `if blockTag == "latest"` guards `cacheBlockByHash(` in `evm_state_poller.go` |
+| `0d156024` fix(evm): treat gas-limit rejections as terminal, not retryable (RHI-6277, #6) | `architecture/evm/gas_limit_errors.go`, `architecture/evm/gas_limit_errors_test.go`, `architecture/evm/error_normalizer.go` | `isTerminalGasLimitRejection` present in `error_normalizer.go` |
+| `b85410ad` (part of "update prod config") base-10 EVM quantity tolerance | `common/utils.go` | `strconv.ParseUint(s, 10, 64)` in `common/utils.go` |
+| `de6d1ee5` fix(ratelimiter): parse rediss:// URI for the Redis store (RHI-6529, #9) | `upstream/ratelimiter_redis_target.go`, `upstream/ratelimiter_redis_target_test.go`, `upstream/ratelimiter_registry.go` | `resolveRateLimiterRedisTarget` called in `ratelimiter_registry.go` |
+| `9d59dc1d` feat(data): carry the block timestamp through shared state; latest poll back on the shared clock (RHI-8244) | `data/shared_state_observation.go` (+ `_test`; was `shared_state_block_timestamp.go` until RHI-8178 generalised it), `architecture/evm/evm_state_poller_shared_clock_test.go`; signature changes in `data/connector.go`, `data/shared_state_variable.go`, call sites in `architecture/evm/evm_state_poller.go`, `architecture/svm/svm_state_poller.go`, `upstream/upstream.go`; `docs/pages/reference/evm/block-tracking.mdx` | `BlockTimestamp` in `data/connector.go`, and `latestBlockShared.TryUpdateIfStale(` (not `IfLocallyStale`) in `evm_state_poller.go` |
+| `a65431c8` feat(evm): cache the poller's block by hash and stream it by hash (RHI-8178, #16; RHI-8260 #17 folded in at the 0.5.0 sync) | `architecture/evm/evm_state_poller_block_cache.go` (+ `_test`), `data/shared_state_observation.go` (+ `_test`), hub + subscriber loop in `erpc/block_stream.go` (+ `_test`); call sites in `architecture/evm/evm_state_poller.go` (`fetchBlock`, `OnLatestBlock`), `erpc/projects_registry.go`, `data/connector.go`, `data/shared_state_variable.go`; signature adapters in `architecture/svm/svm_state_poller.go`, `upstream/upstream.go`; `docs/pages/reference/evm/block-tracking.mdx` | `cacheBlockByHash(` called in `evm_state_poller.go` and guarded by `if blockTag == "latest"` (RHI-8260, `TestPollFinalizedBlock_IsNotCachedByHash`), `hub.hashFor(` used in `erpc/block_stream.go`, `BlockHash` in `data/connector.go` |
+| `1536698e` feat(observability): distinguish upstream dispatch from local rejection (RHI-8707, #20; squash of `672465a8`…`3fa279eb`) | New: `execdiag/`; `common/exec_invocations.go`, `common/dispatch_probe.go`, `common/config_execution_diagnostics.go`; `erpc/networks_execution_diagnostics.go`, `upstream/upstream_execution_diagnostics.go`; tests: `*_execution_diagnostics_test.go`, `clients/dispatch_probe_test.go`, `common/exec_invocations_test.go`, `common/config_execution_diagnostics_test.go`. Call sites: `erpc/init.go`, `erpc/projects.go`, `erpc/http_server.go`, `erpc/multiplexer.go`; `erpc/networks.go` (`Network.Forward` → `forward`, `doForward`, `handleBlockSkip`, `handleMultiplexing`); `erpc/network_executor.go` (hedge leg tag); `upstream/upstream.go`, `upstream/upstream_executor.go`; `clients/http_json_rpc_client.go`, `clients/grpc_bds_client.go`, `clients/grpc_bds_resilience.go`; `common/exec_state.go`, `common/config.go`, `common/defaults.go`, `common/validation.go`. Other: generated `typescript/config` types and `docs/pages/operation/tracing.mdx`. | `execdiag.Configure(` in `erpc/init.go`; `execdiag.BeginRequest(` in `erpc/projects.go`; `execdiag.BeginUpstreamCall(` in `erpc/networks.go`; `execdiag.BeginInvocation(` in `upstream/upstream.go`; `recordBreakerRejection(` in `upstream/upstream_executor.go`; `MarkDispatchAttempted(` in `clients/http_json_rpc_client.go` |
+| `01bf9b51` fix(observability): align execution diagnostics edge cases and docs (RHI-8784, #21; squash of `eb5be9f9`…`64d863e1`) | `execdiag/classify.go`, `execdiag/config.go` (+ tests), `erpc/init.go`, `erpc/networks_execution_diagnostics_test.go`, `common/config_execution_diagnostics_test.go`, `docs/pages/operation/tracing.mdx` | covered by the RHI-8707 probes; `TestClassify*` in `execdiag/` pins the leafless-exhaustion classification |
 
 **RHI-6277 — gas-limit rejections are terminal.** A rejection of the transaction's gas
 limit is classified `ErrEndpointExecutionException` and **not** marked retryable toward
@@ -123,73 +137,6 @@ into envoy's dialer flag plus a `tls.Config` that honours the `tls` block when p
 travel in the URL and envoy's argument would override them. The miniredis-over-TLS test
 (`TestRateLimitersRegistry_RedissURI_SharedCounter`) fails on the unpatched call site, so
 a dropped patch shows up as a test failure, not a silent fail-open.
-
-**RHI-8079 — the corroborated head serves the leader within lag noise.** Upstream 0.3.0
-(#1154) made the network head the plain second-highest upstream head, so one wrong-chain
-upstream cannot make every honest one read as far behind. With two upstreams — nearly
-every network in our prod config — that is always the *lower* head: `latest` is
-interpolated to the lagging upstream while `eth_blockNumber` reports the fresher one, so
-a client that waits for block N and reads `latest` gets N-1 for up to a poll cycle. On
-2026-10-06 that made the orchestrator size four Ethereum deposits from their pre-deposit
-balance, and they bridged dust. `CorroboratedHead` serves the highest head when it leads
-the second-highest by at most `CorroboratedHeadLeadTolerance` (16, the default policy's
-`blockNumberLagAbove`), caps it at the second-highest + 16 for a lead up to
-`DefaultToleratedBlockHeadRollback` (1024), and serves the second-highest beyond that (an
-outlier). The cap is what keeps the head monotonic: the first version (#12) dropped to the
-second-highest past 16, and on dev fast chains (`4663`, `143`, `421614`) the head then
-sawtoothed back 8–16 blocks every few seconds as the leader outran a 5s poller. While
-capped, the block-time EMA samples the leader's own block and timestamp, never the capped
-number. It drives both the tracker head (lag) and the default `latest`/`finalized`
-interpolation; majority (`servedTip`) mode is untouched. SVM feeds the same tracker, so its
-slot head follows the same rule.
-
-*Upstreamable:* worth proposing, but upstream chose "N=2 → the lower head" deliberately
-(see the `PickServedTip` doc comment), so expect a discussion rather than a quick merge.
-If it lands upstream, delete this patch.
-
-*Rebase risk:* low for the logic (its own file; a short block in `corroboratedNetworkHead`,
-the block-time sample line, and one line in `evmHeadReference`). The likely conflicts are
-the upstream test expectations we changed for 1–50 block gaps — keep ours. 0.4.0 (#1208)
-rewrote the condition around the block-time sample line; the merge keeps upstream's condition
-(`>=`, and resample when the timestamp changes on the same head) and our reporter lookup.
-`TestCorroboratedHeadLeadTolerance_MatchesDefaultPolicyLagThreshold` fails if upstream
-moves the default policy's lag threshold; the new `*_head_noise_tolerance_test.go` files
-fail if either call site is dropped, and `TestTrackerHeadLeaderRunningAwayIsCappedNotDropped`
-fails if the head can move back or block time stops being sampled while capped.
-
-**RHI-8113 — the scheduled finalized poll debounces on finality period.** Upstream gates
-both the `latest` and the `finalized` state-poller fetch on `resolveDebounce()`, which is
-derived from estimated block production time. That is right for the head, which advances
-once per block, and wrong for finality: Ethereum finalises at 32-slot/12s epoch
-boundaries — 384s — and every chain deriving its `finalized` tag from L1 finality inherits
-that cadence while producing blocks every second or two, so the pointer is polled two to
-three orders of magnitude more often than it can change. `resolveFinalizedDebounce()`
-gates the **scheduled** fetch on `finalityPeriod × 0.7` from a per-chain consensus table;
-a chain absent from it falls through to `resolveDebounce()`, which is already correct for
-the chains that finalise every block. Measured on prod: 37.4 → 14.6 polls/s, ~$1,017 →
-~$411/mo.
-
-The on-demand path (`PollFinalizedBlockNumber`, reached from `EvmIsBlockFinalized` with
-`forceFreshIfStale`) deliberately keeps `resolveDebounce()`, so upstream selection is
-untouched and only standing background traffic is slowed. Lagging is one-directional: a
-finalized pointer behind reality delays cache promotion and can never mark an unfinalized
-block as final.
-
-The periods are **code constants, not config**, and must stay that way. eRPC parses config
-with `KnownFields(true)`, so a `finalityPeriod` key in the deployed YAML would turn this
-patch being dropped in a rebase into an rpc-proxy start-up failure instead of a silent
-revert to upstream behaviour — the exact failure this file exists to catch, made worse.
-
-*Upstreamable:* yes, nothing here is Rhinestone-specific — though the table would want a
-broader source than our 26 chains before it went up. Never proposed.
-
-*Rebase risk:* low for the logic (its own file), but the **call site is where it dies
-quietly**: if a rebase keeps the new file and reverts the two lines in
-`evm_state_poller.go`, everything still compiles and the patch becomes a no-op. That is
-what the probe checks, and `TestPollFinalizedBlockNumberWiring` fails on it.
-`TestFinalityPeriodTable` pins the 17 entries and asserts the 9 deliberate omissions, so a
-chain moving between groups cannot pass as a one-character diff. Note Ronin's 240s is the
-one value measured rather than derived from a documented mechanism — see RHI-8113.
 
 **RHI-8244 — the block timestamp travels with the head; the `latest` poll stays on the
 shared clock.** Upstream 0.4.0 (#1208) moved the EVM `latest` poll from the shared
@@ -255,6 +202,37 @@ dropped and everything compiles and streams as before, which is what the probes 
 `TestBlockStreamHub_RecordsObservedHashes` catch. The registry wiring (`SetBlockCache` next
 to `SetNetworkConfig`) is the third; without it the poller has no cache and writes nothing.
 
+**RHI-8707 — execution diagnostics: dispatched vs locally rejected, per invocation.** A
+payload-free, budgeted log stream, independent of `logLevel`, records for each upstream
+invocation whether dispatch happened. It exists because breaker rejections and dispatches
+were indistinguishable in production logs and metrics. The RHI-8784 follow-up classifies
+leafless upstream exhaustion as `rejected` and aligns the documentation.
+
+*Upstreamable:* plausibly. Nothing is Rhinestone-specific, but it is large and opinionated.
+Never proposed.
+
+*Rebase risk:* medium. The logic lives in fork-only files, but its call sites sit in
+upstream-active `erpc/networks.go`, `upstream/upstream.go`, `upstream/upstream_executor.go`,
+and `clients/*`.
+
+*Silent-drop analysis:* Dropping `execdiag.Configure(` means the stream never activates;
+tests use `ConfigureForTest`, so only its probe catches that. Dropping `BeginRequest` in
+`projects.go` is caught by `TestExecutionDiagnostics_OutcomeIsAfterNetworkPostForward`,
+`BeginUpstreamCall` by `TestExecutionDiagnostics_UpstreamPreHookRejection`, and
+`recordBreakerRejection` by `TestExecutionDiagnostics_OpenBreakerZeroClientCalls` /
+`TestExecDiag_BreakerAdmissionAndRejection`. Dropping `MarkDispatchAttempted` is caught by
+`TestDispatchProbe_HttpSingle`, and dropping the inbound-trace hook by
+`TestHttpServer_ExecutionDiagnostics_InboundTraceIsLogOnly`. The `Forward`/`forward` rename
+fails loudly at compile time in either direction (duplicate or missing method).
+
+*0.5.0 sync note (2026-10-30):* applied as two three-way patches. Conflicts were the
+import blocks in `erpc/networks.go` and `erpc/http_server.go` (keep both), the
+`NewUpstream` line next to upstream's new Multicall3 wiring (keep both), and `doForward`,
+where upstream's `stampClientResponseID` wrapper and the diagnostics scope both sit: the
+diagnostics scope is outermost and the stamp happens inside it, in `forwardWithHooks`
+(named returns). The `typescript/config/lib` outputs are rebuilt with `pnpm build`, not
+merged.
+
 **Base-10 quantity tolerance.** Some upstreams return EVM quantities as base-10 strings
 instead of `0x`-prefixed hex, which broke upstream health tracking. `HexToUint64` /
 `HexToInt64` accept both.
@@ -265,18 +243,18 @@ instead of `0x`-prefixed hex, which broke upstream health tracking. `HexToUint64
 
 | Patch | What |
 | -- | -- |
-| `301093f3` update prod config | `erpc-prod.yaml` — the production network/upstream config |
-| `0e618231` Cleanup workflows | deletes upstream's CI (benchmark, codeql, dependency-review, release, publish-npm, scorecards, test, xray). We build an image from upstream code and trust it; upstream CI is noise, and `xray.yml` additionally wants secrets. **New upstream workflows do not conflict — they simply appear.** Check `.github/workflows/` after every sync: 0.3.0 added `xray.yml` and the rebase carried it in silently; 0.4.0 added `publish-npm.yml` and modified `release.yml`, which stops the rebase on a modify/delete conflict — resolve by deleting. |
-| `974281fc` Setup minimal CI | our own minimal workflow set |
-| `11a80773` Add the upstream-sync script | `sync-with-upstream.sh` (its `promote-to-prod.sh` and `release.sh` were [removed](#removed-patches)) |
-| `cc65fa4e` feat(ci): CodeBuild multi-arch images (RHI-5507, #4) | `buildspec-amd64.yml`, `buildspec-arm64.yml`, `.github/workflows/docker.yaml` |
-| `6643c1ac` ci: `workflow_dispatch` trigger (RHI-5509, #5) | `.github/workflows/docker.yaml` |
+| `b85410ad` update prod config | `erpc-prod.yaml` — the production network/upstream config |
+| `322a523c` Cleanup workflows | deletes upstream's CI (benchmark, codeql, dependency-review, release, publish-npm, scorecards, test, xray). We build an image from upstream code and trust it; upstream CI is noise, and `xray.yml` additionally wants secrets. **New upstream workflows do not conflict — they simply appear.** Check `.github/workflows/` after every sync: 0.3.0 added `xray.yml` and the rebase carried it in silently; 0.4.0 added `publish-npm.yml` and modified `release.yml`, which stops the rebase on a modify/delete conflict — resolve by deleting; 0.5.0 modified `release.yml` and `test.yml` (same conflict, delete both) and added `codecov.yml` at the repo root, which is carried as a harmless upstream file. |
+| `66e5867d` Setup minimal CI | our own minimal workflow set |
+| `2b46f4b9` Add the upstream-sync script | `sync-with-upstream.sh` (its `promote-to-prod.sh` and `release.sh` were [removed](#removed-patches)) |
+| `07d55f3f` feat(ci): CodeBuild multi-arch images (RHI-5507, #4) | `buildspec-amd64.yml`, `buildspec-arm64.yml`, `.github/workflows/docker.yaml` |
+| `6ac5a118` ci: `workflow_dispatch` trigger (RHI-5509, #5) | `.github/workflows/docker.yaml` |
 
 ### This file
 
 | Patch | Files | Probe |
 | -- | -- | -- |
-| `23ac203b` docs: the patch register itself (#6) | `PATCH_LIST.md`, `CLAUDE.md` | `test -f PATCH_LIST.md`, and `grep -q "This is a fork" CLAUDE.md` |
+| `0d156024` docs: the patch register itself (#6) | `PATCH_LIST.md`, `CLAUDE.md` | `test -f PATCH_LIST.md`, and `grep -q "This is a fork" CLAUDE.md` |
 
 Listed because it is a fork-only file and can be dropped by a sync like any other patch —
 and losing it loses the ability to detect that anything else was dropped. `CLAUDE.md` is
@@ -284,6 +262,42 @@ upstream's file with our section appended, so a rebase may conflict there: keep 
 appended section and take upstream's version of the rest.
 
 ## Removed patches
+
+**`a503823d` fix(health): serve the corroborated head within lag noise, capped** (RHI-8079,
+fork PRs #12 and #13, merged 2026-10-07/08, dropped at the 0.5.0 sync on 2026-10-30).
+
+Served the leading upstream's head as the network head when it led the second-highest by at
+most 16 blocks, capped at second-highest + 16 for a lead up to 1024, so that two-upstream
+networks stopped interpolating `latest` to the laggard while `eth_blockNumber` reported the
+leader (the 2026-10-06 deposit-sizing incident).
+
+Dropped because upstream 0.5.0 (#1263, #1256, #1296, #1274) rewrote the whole served-head
+stack and removed both call sites. There is no default-vs-majority mode any more: every
+config goes through one `servedTip` pipeline with `servedTip.quorum` (default 2 = the
+second-highest head; `1` = the highest), stalled heads are benched out of the ballot and the
+lag reference after `max(30s, 3 × poll period)`, `eth_blockNumber` is answered from that
+same served tip without dispatching, and lag credits a head's age since its last poll. The
+incident's inconsistency — `eth_blockNumber` fresh, `latest` interpolated low — is gone by
+construction; what remains is freshness: with two upstreams `latest` is the lower head for up
+to one poll cycle. A port exists (`dryrun-050`, 2026-10-29: `health/head_noise_tolerance.go`,
+`erpc/networks_head_noise_tolerance.go`, applied after the regression guard) but it fails six
+subtests of upstream's `TestServedTip_StalledHeadIsBenched` and would need re-deriving at
+every sync. The config-only alternative is `servedTip.quorum: 1` on the networks that need
+the fresher head, at the cost of trusting a lone far-ahead head until benching kicks in. Not
+set as of this sync; decide from dev numbers.
+
+**`61db4a8e` feat(evm): debounce the finalized poll on finality period, not block time**
+(RHI-8113, fork PR #14, merged 2026-10-08, dropped at the 0.5.0 sync on 2026-10-30).
+
+Superseded by upstream #1265 and #1269 (in 0.5.0): `evm.finalizedDebounceDepthMultiplier`
+(default 0.05) widens every finalized poll to `(latest − finalized) × EMA block time ×
+multiplier`, with a catch-up rule ours lacked (an upstream behind the network's finalized
+block keeps the regular cadence). It is the weaker hypothesis — no per-chain consensus
+table — and its method is literally named `resolveFinalizedDebounce`, so ours could not
+coexist without a rename. Upstream's default polls finalized roughly 4–5× more often than
+our table did on the listed chains (≈40–60s vs 269s on Ethereum-finality chains); if that
+cost matters, raise the multiplier per network in config rather than carrying code. The
+17-entry period table is in fork PR #14 if a source is ever wanted upstream.
 
 **`174471cd` fix(docker): pin pnpm to the packageManager version** (fork PR #7, merged
 2026-09-29, dropped at the 0.4.0 sync on 2026-10-12).
@@ -303,7 +317,8 @@ conversion. No config in any environment uses a `ws://` endpoint, and at 0.3.0 t
 could not have produced a working upstream anyway — there was no websocket client behind it.
 Upstream `main` above 0.4.0 carries the identical lines as part of the WebSocket work
 (#836), so when the fork syncs past that tag the behaviour returns from upstream, with a
-client behind it.
+client behind it. That happened at the 0.5.0 sync (2026-10-30): `ws://`/`wss://` upstreams are
+now real WebSocket clients upstream, so this entry is closed.
 
 **`d8a76c5d` (part) the `release` branch as the production deploy path** — `promote-to-prod.sh`,
 `release.sh`, and the `release` entries in `.github/workflows/docker.yaml` (removed 2026-10-08).

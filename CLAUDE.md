@@ -49,7 +49,7 @@ of what we carry and the source of truth for it.
   `go test ./architecture/evm/... ./common/...`. A rebase can report success while
   having silently dropped a patch — that has already happened once (see its Removed
   section). Never trust `git log` subjects alone to tell you what our patches are:
-  `343d9615` is called "update prod config" and also changes two Go files.
+  the commit called "update prod config" also changes two Go files (its hash moves at every sync).
 - **Never rebuild `main` by resetting to an upstream ref and cherry-picking** what you
   remember. Rebase, or replay from PATCH_LIST.md and verify every probe.
 - **Adding a fork patch**: put the logic in a NEW file with a minimal call site in the
