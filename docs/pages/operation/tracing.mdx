@@ -314,9 +314,9 @@ Full struct and defaults: <SourceLink file="common/config_execution_diagnostics.
 | Field | Type | Default | Behavior / footguns |
 |---|---|---|---|
 | `executionDiagnostics.enabled` | bool | `true` | `false` disables everything: no per-request ledger, no events. |
-| `executionDiagnostics.maxEventsPerSecond` | float64 | `10` | Token-bucket refill rate **in log lines**, per replica. Request evidence and breaker transitions each get their own bucket with this rate. Must be `> 0`. |
-| `executionDiagnostics.burst` | int | `100` (raised to `1 + maxAttemptEventsPerRequest` when that is larger) | Bucket size in log lines. Must be `>= 1 + maxAttemptEventsPerRequest` so one full request always fits. |
-| `executionDiagnostics.maxAttemptEventsPerRequest` | int | `8` | Cap on `rpc.attempt.completed` lines per request. Must be `>= 1`. Omitted attempts are counted in `attempts_omitted`. |
+| `executionDiagnostics.maxEventsPerSecond` | float64 | `10` | Token-bucket refill rate **in log lines**, per replica. Request evidence and breaker transitions each get their own bucket with this rate. **`0` is treated as unset** — the default is used. Negative values are rejected at startup. |
+| `executionDiagnostics.burst` | int | `100` (raised to `1 + maxAttemptEventsPerRequest` when that is larger) | Bucket size in log lines. **`0` uses the default.** Otherwise it must be `>= 1 + maxAttemptEventsPerRequest` so one full request fits; smaller values are rejected at startup. |
+| `executionDiagnostics.maxAttemptEventsPerRequest` | int | `8` | Cap on `rpc.attempt.completed` lines per request. **`0` is treated as unset** (default `8`); negative values are rejected at startup. Omitted attempts are counted in `attempts_omitted`. |
 
 #### Standard `OTEL_*` environment variables
 
@@ -524,10 +524,10 @@ are recorded. Use `sampleRate: 0.0000001` because `sampleRate: 0` is rewritten t
     logged, even if you lower the level later via the admin API. Source: <SourceLink file="common/tracing_core.go" lines="119-122" />
 13. **`console.error` in TypeScript config scripts throws `TypeError`.** Only `debug`,
     `info`, `log`, `trace`, and `warn` are registered in the Sobek runtime. Source: <SourceLink file="common/console.go" lines="15-21" />
-14. **Execution diagnostics ignore both `logLevel` and the `LOG_LEVEL` floor, except
-    `LOG_LEVEL=disabled`.** Events are written at zerolog's `NoLevel` with an explicit `level`
-    field, so shipped lines look the same. `LOG_LEVEL=disabled` silences them and eRPC logs one
-    `error` line at startup. Source: <SourceLink file="execdiag/config.go" />
+14. **Execution diagnostics ignore config `logLevel` (including `disabled`) and the
+    `LOG_LEVEL` floor.** Events use zerolog's `NoLevel` with an explicit `level` field.
+    `LOG_LEVEL=disabled` and `ERPC_NOLOGS=1` silence the stream completely, with no startup
+    notice: global `Disabled` drops even `NoLevel` events. Source: <SourceLink file="execdiag/config.go" />
 15. **`dispatch=attempted` does not prove the provider received the request.** It means the
     client reached network I/O; a transport failure after that point may or may not have
     reached the provider.
@@ -549,10 +549,15 @@ are recorded. Use `sampleRate: 0.0000001` because `sampleRate: 0` is rewritten t
     `logical_attempts` counts executor attempts (including breaker rejections);
     `dispatches` counts invocations that reached network I/O. Breaker state is per replica,
     per upstream, per failsafe entry (`breaker_scope`).
-22. **A post-forward hook rejecting a response (e.g. an integrity check) is charged to the
+22. **A request whose every candidate is filtered out before any invocation** (e.g. a
+    `use-upstream` selector that matches no upstream) has `invocations=0`, `dispatches=0`,
+    `outcome=rejected`, `final_class=rejected` and `final_error_code`/`final_cause`
+    `ErrUpstreamsExhausted`, with no attempt lines: filtered-out upstreams never reach the
+    invocation ledger. Source: <SourceLink file="execdiag/classify.go" />
+23. **A post-forward hook rejecting a response (e.g. an integrity check) is charged to the
     invocation whose response was returned** (matched by response, not completion order), which keeps `dispatch=attempted` and takes the hook's error
     class, so a request recovered by another upstream is still notable.
-23. **Out of scope:** requests rejected before network forwarding (auth, project rate
+24. **Out of scope:** requests rejected before network forwarding (auth, project rate
     limits), internal requests (state pollers, probes) and cache-connector breakers.
 
 ### Observability
@@ -746,7 +751,7 @@ emit nothing. An emitted request includes all of its invocations, capped by
 | 0 | no error | `result` | no |
 | 1 | `ErrEndpointRequestCanceled`, `ErrUpstreamHedgeCancelled`, `context.Canceled` | `cancelled` | no |
 | 2 | `ErrFailsafeTimeoutExceeded`, `ErrEndpointRequestTimeout`, `ErrNetworkRequestTimeout`, dynamic timeout, `context.DeadlineExceeded` | `timeout` | yes |
-| 3 | `ErrFailsafeCircuitBreakerOpen`, upstream/network/project/auth rate-limit errors, `ErrNoUpstreamsLeftToSelect`, `ErrNoUpstreamsFound` | `rejected` | yes |
+| 3 | `ErrFailsafeCircuitBreakerOpen`, upstream/network/project/auth rate-limit errors, `ErrNoUpstreamsLeftToSelect`, `ErrNoUpstreamsFound`, an `ErrUpstreamsExhausted` that carries no upstream error (nothing was tried) | `rejected` | yes |
 | 4 | `ErrUpstreamRequestSkipped`, method ignored, block unavailable, syncing, shadowing, excluded by policy, not allowed, node-type mismatch | `skipped` | no |
 | 5 | invocation with `dispatch=none` and any other error | `rejected` | yes |
 | 6 | execution exception (revert), client-side, nonce, request too large, `ErrGetLogsExceeded*`, invalid request | `application_error` | no |
@@ -758,8 +763,9 @@ emit nothing. An emitted request includes all of its invocations, capped by
 For a final error that joins several upstream errors, each leaf is classified separately:
 distinct classes give `final_class=mixed` and distinct causes give `final_cause=multiple`.
 `cause` is the first eRPC error code in the chain that is not a wrapper
-(`ErrUpstreamRequest`, `ErrFailsafeRetryExceeded`, `ErrUpstreamsExhausted`), or
-`unknown_error`. Source: <SourceLink file="execdiag/classify.go" />
+(`ErrUpstreamRequest`, `ErrFailsafeRetryExceeded`, `ErrUpstreamsExhausted`). When the chain
+holds only wrappers it is the innermost wrapper code (e.g. `ErrUpstreamsExhausted` when no
+upstream was tried), and `unknown_error` when there is no eRPC code at all. Source: <SourceLink file="execdiag/classify.go" />
 
 Example Loki query: `{app="erpc"} | json | component="execution-diagnostics"`.
 

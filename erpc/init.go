@@ -37,7 +37,7 @@ func Init(
 	}
 	// Diagnostics derive from the logger before logLevel applies: the stream
 	// is payload-free and must not be gated by the configured level.
-	execdiag.Configure(appCtx, cfg.ExecutionDiagnostics, baseLogger, &logger)
+	execdiag.Configure(appCtx, cfg.ExecutionDiagnostics, baseLogger)
 
 	if logger.GetLevel() <= zerolog.InfoLevel {
 		finalCfgJson, err := common.SonicCfg.Marshal(cfg)

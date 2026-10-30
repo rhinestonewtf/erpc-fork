@@ -73,7 +73,7 @@ func newEmitter(base zerolog.Logger, cfg *common.ExecutionDiagnosticsConfig, now
 
 // Configure installs (or removes, when disabled) the process-wide emitter.
 // Safe to call repeatedly: the previous emitter's reporter is stopped.
-func Configure(appCtx context.Context, cfg *common.ExecutionDiagnosticsConfig, base zerolog.Logger, mainLogger *zerolog.Logger) {
+func Configure(appCtx context.Context, cfg *common.ExecutionDiagnosticsConfig, base zerolog.Logger) {
 	stopActive()
 	if !cfg.IsEnabled() {
 		return
@@ -93,15 +93,9 @@ func Configure(appCtx context.Context, cfg *common.ExecutionDiagnosticsConfig, b
 		Int("burst", eff.Burst).
 		Int("max_attempt_events_per_request", eff.MaxAttemptEventsPerRequest).
 		Msg("execution diagnostics configured")
-
-	if zerolog.GlobalLevel() == zerolog.Disabled && mainLogger != nil {
-		mainLogger.Error().
-			Msg("execution diagnostics are enabled but LOG_LEVEL=disabled silences them")
-	}
 }
 
-// event starts a line that bypasses the process-wide LOG_LEVEL floor: zerolog
-// only filters NoLevel at Disabled, so the level is written as a plain field.
+// NoLevel bypasses the LOG_LEVEL floor except Disabled; write level as a field.
 func (e *emitter) event(level zerolog.Level) *zerolog.Event {
 	return e.log.WithLevel(zerolog.NoLevel).Str(zerolog.LevelFieldName, level.String())
 }

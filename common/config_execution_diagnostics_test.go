@@ -62,6 +62,24 @@ func TestExecutionDiagnosticsConfig_DefaultsWhenOmitted(t *testing.T) {
 	assert.NoError(t, big.Validate())
 }
 
+func TestExecutionDiagnosticsConfig_ZeroMeansDefault(t *testing.T) {
+	cfg, err := decodeStrict(t, `
+executionDiagnostics:
+  maxEventsPerSecond: 0
+  burst: 0
+  maxAttemptEventsPerRequest: 0
+`)
+	require.NoError(t, err)
+	d := cfg.ExecutionDiagnostics
+	require.NotNil(t, d)
+	d.SetDefaults()
+	// The documented defaults, not the constants: the docs promise these values.
+	assert.Equal(t, 10.0, d.MaxEventsPerSecond)
+	assert.Equal(t, 100, d.Burst)
+	assert.Equal(t, 8, d.MaxAttemptEventsPerRequest)
+	assert.NoError(t, d.Validate())
+}
+
 func TestExecutionDiagnosticsConfig_Validate(t *testing.T) {
 	cases := []struct {
 		name string

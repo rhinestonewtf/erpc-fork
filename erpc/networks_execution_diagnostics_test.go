@@ -374,6 +374,45 @@ func TestExecutionDiagnostics_RetryExhaustionMixedCauses(t *testing.T) {
 	assert.GreaterOrEqual(t, sum.num("dispatches"), 2)
 }
 
+func TestExecutionDiagnostics_LeaflessExhaustionIsRejected(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForEvmStatePoller()
+	var rpc1Calls, rpc2Calls atomic.Int32
+	diagOk("http://rpc1.localhost", 0, &rpc1Calls)
+	diagOk("http://rpc2.localhost", 0, &rpc2Calls)
+
+	buf := execdiag.ConfigureForTest(t, nil)
+	dumpOnFailure(t, buf)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	network := setupTestNetwork(t, ctx, diagUpstreams(), diagNetworkConfig(diagRetry(2)))
+
+	req := common.NewNormalizedRequest([]byte(diagBalanceReq))
+	req.SetDirectives(&common.RequestDirectives{UseUpstream: "does-not-exist"})
+	_, err := network.Forward(ctx, req)
+	require.Error(t, err)
+	assert.True(t, common.HasErrorCode(err, common.ErrCodeUpstreamsExhausted), "got %v", err)
+	assert.Zero(t, rpc1Calls.Load())
+	assert.Zero(t, rpc2Calls.Load())
+
+	evs := diagEvents(t, buf)
+	for _, ev := range evs {
+		assert.Empty(t, execdiag.UnexpectedEventKeys(ev), "event %v", ev)
+	}
+	assert.Empty(t, diagFilter(evs, "rpc.attempt.completed"))
+	sums := diagFilter(evs, "rpc.request.completed")
+	require.Len(t, sums, 1)
+	sum := sums[0]
+	assert.Equal(t, "rejected", sum.str("outcome"))
+	assert.Equal(t, "warn", sum.str("level"))
+	assert.Equal(t, "rejected", sum.str("final_class"))
+	assert.Equal(t, "ErrUpstreamsExhausted", sum.str("final_error_code"))
+	assert.Equal(t, "ErrUpstreamsExhausted", sum.str("final_cause"))
+	assert.Equal(t, 0, sum.num("invocations"))
+	assert.Equal(t, 0, sum.num("dispatches"))
+}
+
 func TestExecutionDiagnostics_HedgeCancellation(t *testing.T) {
 	hedgeNetwork := func() *common.NetworkConfig {
 		return diagNetworkConfig(&common.FailsafeConfig{
